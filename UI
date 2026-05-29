@@ -1,0 +1,125 @@
+local AzraelUI = {}
+local UIS = game:GetService("UserInputService")
+local CG = (gethui and gethui()) or game:GetService("CoreGui") or game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
+local T = {Bg=Color3.fromRGB(18,18,18), Top=Color3.fromRGB(25,25,25), Btn=Color3.fromRGB(35,35,35), Acc=Color3.fromRGB(0,140,0), Txt=Color3.fromRGB(255,255,255), Fnt=Enum.Font.SourceSansBold}
+local m = UIS.TouchEnabled and not UIS.KeyboardEnabled
+local function cr(c, p) local i = Instance.new(c) for k, v in pairs(p) do i[k] = v end return i end
+function AzraelUI:Notify(txt, dur)
+    if not self.nF then
+        local sg = cr("ScreenGui", {Name="AzNtf", Parent=CG, DisplayOrder=99999})
+        self.nF = cr("Frame", {Size=UDim2.new(0,200,1,0), Position=UDim2.new(1,-210,0,0), BackgroundTransparency=1, Parent=sg})
+        cr("UIListLayout", {Padding=UDim.new(0,5), VerticalAlignment=Enum.VerticalAlignment.Bottom, SortOrder=Enum.SortOrder.LayoutOrder, Parent=self.nF})
+        cr("UIPadding", {PaddingBottom=UDim.new(0,20), Parent=self.nF})
+    end
+    local f = cr("Frame", {Size=UDim2.new(1,0,0,0), BackgroundColor3=T.Bg, Parent=self.nF, ClipsDescendants=true})
+    cr("UICorner", {CornerRadius=UDim.new(0,4), Parent=f})
+    local l = cr("TextLabel", {Size=UDim2.new(1,-10,0,0), Position=UDim2.new(0,5,0,5), BackgroundTransparency=1, Text=txt, TextColor3=T.Txt, Font=T.Fnt, TextSize=13, TextWrapped=true, Parent=f})
+    local b = game:GetService("TextService"):GetTextSize(txt, 13, T.Fnt, Vector2.new(190, 9999))
+    l.Size = UDim2.new(1,-10,0,b.Y) f.Size = UDim2.new(1,0,0,b.Y+10)
+    task.spawn(function() task.wait(dur or 3) f:Destroy() end)
+end
+function AzraelUI:CreateWindow(t)
+    if CG:FindFirstChild("AzF_"..t) then CG["AzF_"..t]:Destroy() end
+    local W = {C={}}
+    local sg = cr("ScreenGui", {Name="AzF_"..t, Parent=CG, ResetOnSpawn=false, DisplayOrder=99998, ZIndexBehavior=Enum.ZIndexBehavior.Sibling})
+    local mf = cr("Frame", {Size=UDim2.new(0,220,0,300), Position=UDim2.new(0.5,-110,0.5,-150), BackgroundColor3=T.Bg, Active=true, Parent=sg, ClipsDescendants=true})
+    cr("UICorner", {CornerRadius=UDim.new(0,6), Parent=mf})
+    local tb = cr("Frame", {Size=UDim2.new(1,0,0,30), BackgroundColor3=T.Top, Parent=mf})
+    cr("UICorner", {CornerRadius=UDim.new(0,6), Parent=tb})
+    cr("Frame", {Size=UDim2.new(1,0,0,6), Position=UDim2.new(0,0,1,-6), BackgroundColor3=T.Top, BorderSizePixel=0, Parent=tb})
+    cr("TextLabel", {Size=UDim2.new(1,-40,1,0), Position=UDim2.new(0,10,0,0), BackgroundTransparency=1, Text=t, TextColor3=T.Txt, Font=T.Fnt, TextSize=14, TextXAlignment=Enum.TextXAlignment.Left, Parent=tb})
+    local cl = cr("TextButton", {Size=UDim2.new(0,30,0,30), Position=UDim2.new(1,-30,0,0), BackgroundTransparency=1, Text="X", TextColor3=Color3.fromRGB(200,50,50), Font=T.Fnt, TextSize=16, Parent=tb})
+    local tg = cr("TextButton", {Size=UDim2.new(0,30,0,30), Position=UDim2.new(1,-60,0,0), BackgroundTransparency=1, Text="-", TextColor3=T.Txt, Font=T.Fnt, TextSize=18, Parent=tb})
+    local cf = cr("ScrollingFrame", {Size=UDim2.new(1,-10,1,-40), Position=UDim2.new(0,5,0,35), BackgroundTransparency=1, ScrollBarThickness=2, BorderSizePixel=0, Parent=mf})
+    local ll = cr("UIListLayout", {Padding=UDim.new(0,4), SortOrder=Enum.SortOrder.LayoutOrder, Parent=cf})
+    table.insert(W.C, ll:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function() task.defer(function() cf.CanvasSize=UDim2.new(0,0,0,ll.AbsoluteContentSize.Y+5) end) end))
+    local dr, di, ds, sp, tw
+    table.insert(W.C, tb.InputBegan:Connect(function(i) if not tw and (i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch) then dr=true ds=i.Position sp=mf.Position local c c=i.Changed:Connect(function() if i.UserInputState==Enum.UserInputState.End then dr=false if c then c:Disconnect() end end end) end end))
+    table.insert(W.C, tb.InputChanged:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch then di=i end end))
+    table.insert(W.C, UIS.InputChanged:Connect(function(i) if i==di and dr and not tw then mf.Position=UDim2.new(sp.X.Scale,sp.X.Offset+(i.Position-ds).X,sp.Y.Scale,sp.Y.Offset+(i.Position-ds).Y) end end))
+    local sH, im = 300, false
+    table.insert(W.C, tg.MouseButton1Click:Connect(function() tw=true im=not im tg.Text=im and "+" or "-" mf.Size=im and UDim2.new(0,220,0,30) or UDim2.new(0,220,0,sH) task.wait(0.1) tw=false end))
+    table.insert(W.C, cl.MouseButton1Click:Connect(function() W:Destroy() end))
+    table.insert(W.C, sg.Destroying:Connect(function() for _, c in pairs(W.C) do if c then c:Disconnect() end end table.clear(W.C) end))
+    function W:Destroy() sg:Destroy() end
+    function W:AddLabel(tx)
+        local l = cr("TextLabel", {Size=UDim2.new(1,0,0,20), BackgroundTransparency=1, Text="  "..tx, TextColor3=Color3.fromRGB(150,150,150), Font=T.Fnt, TextSize=12, TextXAlignment=Enum.TextXAlignment.Left, Parent=cf})
+        return l
+    end
+    function W:AddButton(tx, cb)
+        local b = cr("TextButton", {Size=UDim2.new(1,0,0,28), BackgroundColor3=T.Btn, Text="  "..tx, TextColor3=T.Txt, Font=T.Fnt, TextSize=13, TextXAlignment=Enum.TextXAlignment.Left, Active=false, Parent=cf})
+        cr("UICorner", {CornerRadius=UDim.new(0,4), Parent=b})
+        table.insert(W.C, b.MouseButton1Click:Connect(function() task.spawn(cb) end))
+        return b
+    end
+    function W:AddToggle(tx, st, cb)
+        local v = st or false
+        local b = cr("TextButton", {Size=UDim2.new(1,0,0,28), BackgroundColor3=v and T.Acc or T.Btn, Text="  "..tx, TextColor3=T.Txt, Font=T.Fnt, TextSize=13, TextXAlignment=Enum.TextXAlignment.Left, Active=false, Parent=cf})
+        cr("UICorner", {CornerRadius=UDim.new(0,4), Parent=b})
+        local o = {} function o:Set(nv) v=nv b.BackgroundColor3=v and T.Acc or T.Btn task.spawn(cb, v) end
+        table.insert(W.C, b.MouseButton1Click:Connect(function() o:Set(not v) end))
+        return o
+    end
+    function W:AddSlider(tx, mn, mx, df, stp, cb)
+        local f = cr("Frame", {Size=UDim2.new(1,0,0,40), BackgroundColor3=T.Btn, Parent=cf})
+        cr("UICorner", {CornerRadius=UDim.new(0,4), Parent=f})
+        cr("TextLabel", {Size=UDim2.new(1,-10,0,20), Position=UDim2.new(0,5,0,0), BackgroundTransparency=1, Text=tx, TextColor3=T.Txt, Font=T.Fnt, TextSize=13, TextXAlignment=Enum.TextXAlignment.Left, Parent=f})
+        local vl = cr("TextLabel", {Size=UDim2.new(1,-10,0,20), Position=UDim2.new(0,5,0,0), BackgroundTransparency=1, Text=tostring(df), TextColor3=T.Txt, Font=T.Fnt, TextSize=13, TextXAlignment=Enum.TextXAlignment.Right, Parent=f})
+        local b = cr("Frame", {Size=UDim2.new(1,-10,0,4), Position=UDim2.new(0,5,0,26), BackgroundColor3=T.Bg, Parent=f})
+        cr("UICorner", {CornerRadius=UDim.new(0,2), Parent=b})
+        local fL = cr("Frame", {Size=UDim2.new((df-mn)/(mx-mn),0,1,0), BackgroundColor3=T.Acc, Parent=b})
+        cr("UICorner", {CornerRadius=UDim.new(0,2), Parent=fL})
+        local btn = cr("TextButton", {Size=UDim2.new(1,0,1,0), BackgroundTransparency=1, Text="", Active=false, Parent=b})
+        local d = string.split(tostring(stp), ".") d = d[2] and #d[2] or 0
+        local function up(i)
+            local pct = math.clamp((i.Position.X - b.AbsolutePosition.X) / b.AbsoluteSize.X, 0, 1)
+            local raw = mn + (mx - mn) * pct
+            local stpV = math.floor((raw / stp) + 0.5) * stp
+            local fV = tonumber(string.format("%."..d.."f", stpV))
+            fL.Size = UDim2.new(math.clamp((fV - mn) / (mx - mn), 0, 1), 0, 1, 0)
+            vl.Text = tostring(fV) task.spawn(cb, fV)
+        end
+        local sD
+        table.insert(W.C, btn.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then sD=true cf.ScrollingEnabled=false up(i) end end))
+        table.insert(W.C, btn.InputEnded:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then sD=false cf.ScrollingEnabled=true end end))
+        table.insert(W.C, UIS.InputChanged:Connect(function(i) if sD and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then up(i) end end))
+        local o = {} function o:Set(nv) local fV = math.clamp(math.floor((nv / stp) + 0.5) * stp, mn, mx) fL.Size=UDim2.new((fV-mn)/(mx-mn),0,1,0) vl.Text=tostring(fV) task.spawn(cb, fV) end return o
+    end
+    function W:AddInput(tx, df, nO, cb)
+        local f = cr("Frame", {Size=UDim2.new(1,0,0,28), BackgroundColor3=T.Btn, Parent=cf})
+        cr("UICorner", {CornerRadius=UDim.new(0,4), Parent=f})
+        cr("TextLabel", {Size=UDim2.new(0.6,0,1,0), Position=UDim2.new(0,5,0,0), BackgroundTransparency=1, Text=tx, TextColor3=T.Txt, Font=T.Fnt, TextSize=13, TextXAlignment=Enum.TextXAlignment.Left, Parent=f})
+        local tB = cr("TextBox", {Size=UDim2.new(0.4,-10,1,-8), Position=UDim2.new(0.6,5,0,4), BackgroundColor3=T.Bg, TextColor3=T.Txt, Font=T.Fnt, TextSize=13, Text=tostring(df), ClearTextOnFocus=false, ClipsDescendants=true, TextTruncate=Enum.TextTruncate.AtEnd, Parent=f})
+        if m and nO then tB.TextInputType = Enum.TextInputType.Number end
+        cr("UICorner", {CornerRadius=UDim.new(0,4), Parent=tB})
+        table.insert(W.C, tB.Focused:Connect(function() local pos=f.AbsolutePosition.Y-cf.AbsolutePosition.Y+cf.CanvasPosition.Y cf.CanvasPosition=Vector2.new(0,pos-10) end))
+        table.insert(W.C, tB.FocusLost:Connect(function(ep) if ep or m then local v=tB.Text if nO and not tonumber(v) then tB.Text=tostring(df) return end task.spawn(cb, tB.Text) end end))
+        local o={} function o:Set(nv) tB.Text=tostring(nv) task.spawn(cb, nv) end return o
+    end
+    function W:AddCycle(tx, arr, cb)
+        local f = cr("Frame", {Size=UDim2.new(1,0,0,28), BackgroundColor3=T.Btn, Parent=cf})
+        cr("UICorner", {CornerRadius=UDim.new(0,4), Parent=f})
+        cr("TextLabel", {Size=UDim2.new(0.5,0,1,0), Position=UDim2.new(0,5,0,0), BackgroundTransparency=1, Text=tx, TextColor3=T.Txt, Font=T.Fnt, TextSize=13, TextXAlignment=Enum.TextXAlignment.Left, Parent=f})
+        local b = cr("TextButton", {Size=UDim2.new(0.5,-10,1,-8), Position=UDim2.new(0.5,5,0,4), BackgroundColor3=T.Bg, TextColor3=T.Acc, Font=T.Fnt, TextSize=13, Text=tostring(arr[1]), Active=false, Parent=f})
+        cr("UICorner", {CornerRadius=UDim.new(0,4), Parent=b})
+        local idx = 1
+        local o = {} function o:Set(val) local fnd=1 for i,v in ipairs(arr) do if v==val then fnd=i break end end idx=fnd b.Text=tostring(arr[idx]) task.spawn(cb, arr[idx]) end
+        table.insert(W.C, b.MouseButton1Click:Connect(function() idx=idx+1 if idx>#arr then idx=1 end b.Text=tostring(arr[idx]) task.spawn(cb, arr[idx]) end))
+        return o
+    end
+    function W:AddKeybind(tx, dK, cb)
+        if m then return nil end
+        local f = cr("Frame", {Size=UDim2.new(1,0,0,28), BackgroundColor3=T.Btn, Parent=cf})
+        cr("UICorner", {CornerRadius=UDim.new(0,4), Parent=f})
+        cr("TextLabel", {Size=UDim2.new(0.6,0,1,0), Position=UDim2.new(0,5,0,0), BackgroundTransparency=1, Text=tx, TextColor3=T.Txt, Font=T.Fnt, TextSize=13, TextXAlignment=Enum.TextXAlignment.Left, Parent=f})
+        local b = cr("TextButton", {Size=UDim2.new(0.4,-10,1,-8), Position=UDim2.new(0.6,5,0,4), BackgroundColor3=T.Bg, TextColor3=Color3.fromRGB(200,200,200), Font=T.Fnt, TextSize=13, Text=dK and dK.Name or "None", Active=false, Parent=f})
+        cr("UICorner", {CornerRadius=UDim.new(0,4), Parent=b})
+        local k, w = dK, false
+        table.insert(W.C, b.MouseButton1Click:Connect(function() w=true b.Text="..." end))
+        table.insert(W.C, UIS.InputBegan:Connect(function(i,g) if w and i.UserInputType==Enum.UserInputType.Keyboard then w=false if i.KeyCode==Enum.KeyCode.Escape then k=nil b.Text="None" else k=i.KeyCode b.Text=k.Name end task.spawn(cb, k) end end))
+        local o={} function o:Set(nk) k=nk b.Text=nk and nk.Name or "None" task.spawn(cb, k) end return o
+    end
+    sH = mf.AbsoluteSize.Y
+    return W
+end
+return AzraelUI
