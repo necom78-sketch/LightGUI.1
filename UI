@@ -1,0 +1,345 @@
+local AzraelUI = {}
+local UIS = game:GetService("UserInputService")
+local TS  = game:GetService("TextService")
+local CG  = (gethui and gethui()) or game:GetService("CoreGui") or game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
+local DefT = {
+    Bg  = Color3.fromRGB(18,18,18),
+    Top = Color3.fromRGB(25,25,25),
+    Btn = Color3.fromRGB(35,35,35),
+    Acc = Color3.fromRGB(0,140,0),
+    Txt = Color3.fromRGB(255,255,255),
+    Err = Color3.fromRGB(220,60,60),
+    Fnt = Enum.Font.SourceSansBold
+}
+local inCb, _wId, _wins = {}, 0, {}
+local _nF = nil
+local _MM,_TC,_MB1,_KB = Enum.UserInputType.MouseMovement,Enum.UserInputType.Touch,Enum.UserInputType.MouseButton1,Enum.UserInputType.Keyboard
+
+local function _isMobile() return UIS.TouchEnabled and not UIS.KeyboardEnabled end
+
+local _icc = UIS.InputChanged:Connect(function(i)
+    local t = i.UserInputType
+    if t == _MM or t == _TC then
+        for _,f in pairs(inCb) do f(i) end
+    end
+end)
+
+local function ss(f,...)
+    if not f then return end
+    task.spawn(function(...) local ok,err=pcall(f,...) if not ok then warn("[AzUI] "..tostring(err)) end end,...)
+end
+
+local function cr(c,p)
+    local i = Instance.new(c)
+    for k,v in pairs(p) do if k ~= "Parent" then i[k] = v end end
+    if p.Parent then i.Parent = p.Parent end
+    return i
+end
+
+local function mkFeedback(W,b,excl)
+    table.insert(W.C, b.InputBegan:Connect(function(i)
+        if not (excl and excl()) and (i.UserInputType==_MB1 or i.UserInputType==_TC) then
+            b.BackgroundTransparency = 0.3
+        end
+    end))
+    table.insert(W.C, b.InputEnded:Connect(function(i)
+        if not (excl and excl()) and (i.UserInputType==_MB1 or i.UserInputType==_TC) then
+            b.BackgroundTransparency = 0
+        end
+    end))
+end
+
+function AzraelUI:Destroy()
+    local snap = table.clone(_wins)
+    for _,w in pairs(snap) do w:Destroy() end
+    _icc:Disconnect()
+end
+
+function AzraelUI:GetWindow(t) return _wins[t] end
+
+function AzraelUI:SetTheme(tbl)
+    for k,v in pairs(tbl) do DefT[k] = v end
+    warn("[AzUI] SetTheme: существующие окна не перестраиваются. Пересоздай их через CreateWindow.")
+end
+
+function AzraelUI:Notify(tx,dr,typ)
+    if not _nF or not _nF.Parent then
+        local sg = cr("ScreenGui",{Name="AzNtf",DisplayOrder=99999,Parent=CG})
+        _nF = cr("Frame",{Size=UDim2.new(0,200,1,0),Position=UDim2.new(1,-210,0,0),BackgroundTransparency=1,Parent=sg})
+        cr("UIListLayout",{Padding=UDim.new(0,5),VerticalAlignment=Enum.VerticalAlignment.Bottom,SortOrder=Enum.SortOrder.LayoutOrder,Parent=_nF})
+        cr("UIPadding",{PaddingBottom=UDim.new(0,20),Parent=_nF})
+    end
+    local f = cr("Frame",{Size=UDim2.new(1,0,0,0),BackgroundColor3=DefT.Bg,ClipsDescendants=true,Parent=_nF})
+    cr("UICorner",{CornerRadius=UDim.new(0,4),Parent=f})
+    local bC = (typ=="err" and DefT.Err) or (typ=="ok" and DefT.Acc) or Color3.fromRGB(0,140,255)
+    cr("Frame",{Size=UDim2.new(0,3,1,0),BackgroundColor3=bC,BorderSizePixel=0,Parent=f})
+    local l = cr("TextLabel",{Size=UDim2.new(1,-15,0,0),Position=UDim2.new(0,10,0,5),BackgroundTransparency=1,Text=tx,TextColor3=DefT.Txt,Font=DefT.Fnt,TextSize=13,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Parent=f})
+    local b = TS:GetTextSize(tx,13,DefT.Fnt,Vector2.new(185,9999))
+    l.Size = UDim2.new(1,-15,0,b.Y)
+    f.Size = UDim2.new(1,0,0,b.Y+10)
+    task.delay(dr or 3, function() if f.Parent then f:Destroy() end end)
+end
+
+function AzraelUI:CreateWindow(t,cfg)
+    if _wins[t] then _wins[t]:Destroy() end
+    cfg = cfg or {}
+    local W = {C={},Inp={}}
+    local T = {}
+    for k,v in pairs(DefT) do T[k] = (cfg.theme and cfg.theme[k]) or v end
+    local sz = cfg.size or UDim2.new(0,220,0,300)
+    local ps = cfg.pos  or UDim2.new(0.5,-110,0.5,-150)
+
+    local sg = cr("ScreenGui",{Name="AzF_"..t,ResetOnSpawn=false,DisplayOrder=99998,ZIndexBehavior=Enum.ZIndexBehavior.Sibling,Parent=CG})
+    local mf = cr("Frame",{Size=sz,Position=ps,BackgroundColor3=T.Bg,Active=true,ClipsDescendants=true,Parent=sg})
+    cr("UICorner",{CornerRadius=UDim.new(0,6),Parent=mf})
+    local tb = cr("Frame",{Size=UDim2.new(1,0,0,30),BackgroundColor3=T.Top,Parent=mf})
+    cr("UICorner",{CornerRadius=UDim.new(0,6),Parent=tb})
+    cr("Frame",{Size=UDim2.new(1,0,0,6),Position=UDim2.new(0,0,1,-6),BackgroundColor3=T.Top,BorderSizePixel=0,Parent=tb})
+    cr("TextLabel",{Size=UDim2.new(1,-40,1,0),Position=UDim2.new(0,10,0,0),BackgroundTransparency=1,Text=t,TextColor3=T.Txt,Font=T.Fnt,TextSize=14,TextXAlignment=Enum.TextXAlignment.Left,Parent=tb})
+    local cl = cr("TextButton",{Size=UDim2.new(0,30,0,30),Position=UDim2.new(1,-30,0,0),BackgroundTransparency=1,Text="X",TextColor3=T.Err,Font=T.Fnt,TextSize=16,AutoButtonColor=false,Parent=tb})
+    local tg = cr("TextButton",{Size=UDim2.new(0,30,0,30),Position=UDim2.new(1,-60,0,0),BackgroundTransparency=1,Text="-",TextColor3=T.Txt,Font=T.Fnt,TextSize=18,AutoButtonColor=false,Parent=tb})
+    local cf = cr("ScrollingFrame",{Size=UDim2.new(1,-10,1,-40),Position=UDim2.new(0,5,0,35),BackgroundTransparency=1,ScrollBarThickness=2,BorderSizePixel=0,Parent=mf})
+    cr("UIPadding",{PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),Parent=cf})
+    local ll = cr("UIListLayout",{Padding=UDim.new(0,4),SortOrder=Enum.SortOrder.LayoutOrder,Parent=cf})
+
+    local pL = false
+    table.insert(W.C, ll:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        if pL then return end pL = true
+        task.defer(function()
+            pL = false
+            if ll.Parent then cf.CanvasSize = UDim2.new(0,0,0,ll.AbsoluteContentSize.Y+5) end
+        end)
+    end))
+
+    local dr,di,dsX,dsY,spX,spY,tw = false,nil,0,0,0,0,false
+    table.insert(W.C, tb.InputBegan:Connect(function(i)
+        if not tw and (i.UserInputType==_MB1 or i.UserInputType==_TC) then
+            dr=true dsX=i.Position.X dsY=i.Position.Y
+            spX=mf.Position.X.Offset spY=mf.Position.Y.Offset di=i
+        end
+    end))
+    table.insert(W.C, UIS.InputEnded:Connect(function(i)
+        if dr and (i.UserInputType==_MB1 or i.UserInputType==_TC) then dr=false di=nil end
+    end))
+
+    _wId = _wId+1
+    local inID = _wId
+    inCb[inID] = function(i)
+        if dr and not tw and i==di then
+            mf.Position = UDim2.new(mf.Position.X.Scale,spX+(i.Position.X-dsX),mf.Position.Y.Scale,spY+(i.Position.Y-dsY))
+        end
+        for _,f in ipairs(W.Inp) do f(i) end
+    end
+
+    local im = false
+    table.insert(W.C, tg.MouseButton1Click:Connect(function()
+        if tw then return end tw = true
+        im = not im
+        tg.Text = im and "+" or "-"
+        mf.Size = im and UDim2.new(0,mf.AbsoluteSize.X,0,30) or sz
+        task.wait(0.1) tw = false
+    end))
+
+    local _sA = 0
+    local _d  = false
+    function W:Destroy()
+        if _d then return end _d = true
+        _wins[t] = nil
+        inCb[inID] = nil
+        for _,c in pairs(W.C) do if c then c:Disconnect() end end
+        table.clear(W.C) table.clear(W.Inp) _sA = 0
+        sg:Destroy()
+    end
+    function W:SetVisible(v)
+        if v == nil then sg.Enabled = not sg.Enabled
+        else sg.Enabled = v == true end
+    end
+    function W:Hide() sg.Enabled = false end
+    function W:Show() sg.Enabled = true  end
+
+    table.insert(W.C, cl.MouseButton1Click:Connect(function() W:Destroy() end))
+    table.insert(W.C, sg.Destroying:Connect(function() W:Destroy() end))
+    _wins[t] = W
+
+    function W:AddSeparator()
+        return cr("Frame",{Size=UDim2.new(1,0,0,1),BackgroundColor3=Color3.fromRGB(50,50,50),BorderSizePixel=0,Parent=cf})
+    end
+
+    function W:AddSection(tx)
+        return cr("TextLabel",{Size=UDim2.new(1,0,0,22),BackgroundTransparency=1,Text=("— %s —"):format(tx),TextColor3=Color3.fromRGB(130,130,130),Font=T.Fnt,TextSize=12,Parent=cf})
+    end
+
+    function W:AddLabel(tx)
+        return cr("TextLabel",{Size=UDim2.new(1,0,0,20),BackgroundTransparency=1,Text=tx,TextColor3=Color3.fromRGB(180,180,180),Font=T.Fnt,TextSize=12,TextXAlignment=Enum.TextXAlignment.Left,Parent=cf})
+    end
+
+    function W:AddButton(tx,cb,cnf)
+        local b = cr("TextButton",{Size=UDim2.new(1,0,0,28),BackgroundColor3=T.Btn,Text=tx,TextColor3=T.Txt,Font=T.Fnt,TextSize=13,TextXAlignment=Enum.TextXAlignment.Left,AutoButtonColor=false,Parent=cf})
+        cr("UICorner",{CornerRadius=UDim.new(0,4),Parent=b})
+        local cS = false
+        mkFeedback(W, b, function() return cS end)
+        table.insert(W.C, b.MouseButton1Click:Connect(function()
+            if cnf and not cS then
+                cS = true b.Text="Подтвердить?" b.TextColor3=T.Err
+                task.delay(3, function()
+                    if cS and b.Parent then cS=false b.Text=tx b.TextColor3=T.Txt end
+                end)
+                return
+            end
+            cS=false b.Text=tx b.TextColor3=T.Txt ss(cb)
+        end))
+        return b
+    end
+
+    function W:AddToggle(tx,st,cb)
+        local v = st==true
+        local b = cr("TextButton",{Size=UDim2.new(1,0,0,28),BackgroundColor3=v and T.Acc or T.Btn,Text=tx..(v and " [ON]" or " [OFF]"),TextColor3=T.Txt,Font=T.Fnt,TextSize=13,TextXAlignment=Enum.TextXAlignment.Left,AutoButtonColor=false,Parent=cf})
+        cr("UICorner",{CornerRadius=UDim.new(0,4),Parent=b})
+        local o = {}
+        function o:Set(nv,sl) v=nv b.BackgroundColor3=v and T.Acc or T.Btn b.Text=tx..(v and " [ON]" or " [OFF]") if not sl then ss(cb,v) end end
+        function o:Get() return v end
+        mkFeedback(W, b)
+        table.insert(W.C, b.MouseButton1Click:Connect(function() o:Set(not v) end))
+        return o
+    end
+
+    function W:AddSlider(tx,mn,mx,df,stp,cb)
+        if not stp or stp<=0 then stp=1 end
+        if mx<=mn then mx=mn+1 end
+        df = math.clamp(df,mn,mx)
+        local f = cr("Frame",{Size=UDim2.new(1,0,0,40),BackgroundColor3=T.Btn,Parent=cf})
+        cr("UICorner",{CornerRadius=UDim.new(0,4),Parent=f})
+        cr("TextLabel",{Size=UDim2.new(0.65,-5,0,20),Position=UDim2.new(0,5,0,0),BackgroundTransparency=1,Text=tx,TextColor3=T.Txt,Font=T.Fnt,TextSize=13,TextXAlignment=Enum.TextXAlignment.Left,Parent=f})
+        local vl = cr("TextBox",{Size=UDim2.new(0.35,-5,0,20),Position=UDim2.new(0.65,0,0,0),BackgroundTransparency=1,Text=tostring(df),TextColor3=T.Txt,Font=T.Fnt,TextSize=13,TextXAlignment=Enum.TextXAlignment.Right,ClearTextOnFocus=false,TextTruncate=Enum.TextTruncate.AtEnd,ClipsDescendants=true,Active=false,Parent=f})
+        if _isMobile() then vl.TextInputType = Enum.TextInputType.Number end
+        local b  = cr("Frame",{Size=UDim2.new(1,-10,0,4),Position=UDim2.new(0,5,0,26),BackgroundColor3=T.Bg,Parent=f})
+        cr("UICorner",{CornerRadius=UDim.new(0,2),Parent=b})
+        local fL = cr("Frame",{Size=UDim2.new(math.clamp((df-mn)/(mx-mn),0,1),0,1,0),BackgroundColor3=T.Acc,Parent=b})
+        cr("UICorner",{CornerRadius=UDim.new(0,2),Parent=fL})
+        local btn = cr("TextButton",{Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,Text="",AutoButtonColor=false,Parent=b})
+        local dcs = stp<1 and math.min(6,math.max(0,math.ceil(-math.log10(stp)))) or 0
+        local fmt = "%."..dcs.."f"
+        local sD,sDi,lF,ax,aw = false,nil,0,0,1
+        local o = {}
+        function o:Get() return tonumber(vl.Text) or mn end
+        function o:Set(nv,sl)
+            local strV = string.format(fmt,math.clamp(math.floor((nv/stp)+0.5)*stp,mn,mx))
+            local fV = tonumber(strV) or mn
+            fL.Size = UDim2.new((fV-mn)/(mx-mn),0,1,0) vl.Text=strV
+            if not sl then ss(cb,fV) end
+        end
+        local function up(i)
+            local nw = os.clock() if nw-lF<=0.05 then return end lF=nw
+            local strV = string.format(fmt,math.floor(((mn+(mx-mn)*math.clamp((i.Position.X-ax)/aw,0,1))/stp)+0.5)*stp)
+            local fV = tonumber(strV) or mn
+            fL.Size = UDim2.new(math.clamp((fV-mn)/(mx-mn),0,1),0,1,0) vl.Text=strV ss(cb,fV)
+        end
+        table.insert(W.C, btn.InputBegan:Connect(function(i)
+            if i.UserInputType==_MB1 or i.UserInputType==_TC then
+                if i.UserInputType==_MB1 and not sD then vl:CaptureFocus() end
+                sD=true sDi=i ax=b.AbsolutePosition.X aw=b.AbsoluteSize.X
+                _sA=_sA+1 if _sA==1 then cf.ScrollingEnabled=false end
+                up(i)
+            end
+        end))
+        table.insert(W.C, UIS.InputEnded:Connect(function(i)
+            if sD and i==sDi then
+                sD=false sDi=nil
+                _sA=math.max(0,_sA-1) if _sA==0 then cf.ScrollingEnabled=true end
+                local fV=tonumber(vl.Text) or mn
+                local nw=os.clock() if nw-lF>0.05 then ss(cb,fV) end
+            end
+        end))
+        table.insert(W.C, vl.FocusLost:Connect(function()
+            local nv = tonumber(vl.Text)
+            if nv then o:Set(nv,true) ss(cb,o:Get()) else vl.Text=string.format(fmt,mn) end
+        end))
+        table.insert(W.Inp, function(i) if sD and i==sDi and (i.UserInputType==_MM or i.UserInputType==_TC) then up(i) end end)
+        return o
+    end
+
+    function W:AddInput(tx,df,nO,cb)
+        local f = cr("Frame",{Size=UDim2.new(1,0,0,28),BackgroundColor3=T.Btn,Parent=cf})
+        cr("UICorner",{CornerRadius=UDim.new(0,4),Parent=f})
+        cr("TextLabel",{Size=UDim2.new(0.6,0,1,0),Position=UDim2.new(0,5,0,0),BackgroundTransparency=1,Text=tx,TextColor3=T.Txt,Font=T.Fnt,TextSize=13,TextXAlignment=Enum.TextXAlignment.Left,Parent=f})
+        local tB = cr("TextBox",{Size=UDim2.new(0.4,-10,1,-8),Position=UDim2.new(0.6,5,0,4),BackgroundColor3=T.Bg,TextColor3=T.Txt,Font=T.Fnt,TextSize=13,Text=tostring(df),ClearTextOnFocus=false,ClipsDescendants=true,TextTruncate=Enum.TextTruncate.AtEnd,Parent=f})
+        if _isMobile() and nO then tB.TextInputType = Enum.TextInputType.Number end
+        cr("UICorner",{CornerRadius=UDim.new(0,4),Parent=tB})
+        local lastValid = tostring(df)
+        table.insert(W.C, tB.Focused:Connect(function()
+            if nO then tB.Text="" end
+            task.defer(function()
+                if tB.Parent then
+                    cf.CanvasPosition = Vector2.new(0,f.AbsolutePosition.Y-cf.AbsolutePosition.Y+cf.CanvasPosition.Y-10)
+                end
+            end)
+        end))
+        table.insert(W.C, tB.FocusLost:Connect(function()
+            local v = tB.Text
+            if nO and not tonumber(v) then tB.Text=lastValid return end
+            lastValid = tB.Text
+            ss(cb,tB.Text)
+        end))
+        local o = {}
+        function o:Set(nv,sl) tB.Text=tostring(nv) lastValid=tostring(nv) if not sl then ss(cb,nv) end end
+        function o:Get() return tB.Text end
+        return o
+    end
+
+    function W:AddCycle(tx,arr,cb)
+        if not arr or #arr==0 then return nil end
+        local a = table.clone(arr)
+        local f = cr("Frame",{Size=UDim2.new(1,0,0,28),BackgroundColor3=T.Btn,Parent=cf})
+        cr("UICorner",{CornerRadius=UDim.new(0,4),Parent=f})
+        cr("TextLabel",{Size=UDim2.new(0.5,0,1,0),Position=UDim2.new(0,5,0,0),BackgroundTransparency=1,Text=tx,TextColor3=T.Txt,Font=T.Fnt,TextSize=13,TextXAlignment=Enum.TextXAlignment.Left,Parent=f})
+        local b = cr("TextButton",{Size=UDim2.new(0.5,-10,1,-8),Position=UDim2.new(0.5,5,0,4),BackgroundColor3=T.Bg,TextColor3=T.Acc,Font=T.Fnt,TextSize=13,Text=tostring(a[1]),AutoButtonColor=false,Parent=f})
+        cr("UICorner",{CornerRadius=UDim.new(0,4),Parent=b})
+        local idx = 1
+        local o = {}
+        function o:Set(val,sl)
+            local sv = tostring(val)
+            for i=1,#a do
+                if tostring(a[i])==sv then
+                    idx=i b.Text=tostring(a[idx])
+                    if not sl then ss(cb,a[idx]) end
+                    return
+                end
+            end
+        end
+        function o:Get() return a[idx] end
+        mkFeedback(W, b)
+        table.insert(W.C, b.MouseButton1Click:Connect(function()
+            idx = idx+1 if idx>#a then idx=1 end
+            b.Text = tostring(a[idx]) ss(cb,a[idx])
+        end))
+        return o
+    end
+
+    function W:AddKeybind(tx,dK,cb)
+        if _isMobile() then return nil end
+        local f = cr("Frame",{Size=UDim2.new(1,0,0,28),BackgroundColor3=T.Btn,Parent=cf})
+        cr("UICorner",{CornerRadius=UDim.new(0,4),Parent=f})
+        cr("TextLabel",{Size=UDim2.new(0.6,0,1,0),Position=UDim2.new(0,5,0,0),BackgroundTransparency=1,Text=tx,TextColor3=T.Txt,Font=T.Fnt,TextSize=13,TextXAlignment=Enum.TextXAlignment.Left,Parent=f})
+        local b = cr("TextButton",{Size=UDim2.new(0.4,-10,1,-8),Position=UDim2.new(0.6,5,0,4),BackgroundColor3=T.Bg,TextColor3=Color3.fromRGB(200,200,200),Font=T.Fnt,TextSize=13,Text=dK and dK.Name or "None",AutoButtonColor=false,Parent=f})
+        cr("UICorner",{CornerRadius=UDim.new(0,4),Parent=b})
+        local k,w = dK,false
+        mkFeedback(W, b)
+        table.insert(W.C, b.MouseButton1Click:Connect(function()
+            if w then return end w=true b.Text="..."
+            task.delay(10, function() if w and b.Parent then w=false b.Text=k and k.Name or "None" end end)
+        end))
+        table.insert(W.C, UIS.InputBegan:Connect(function(i,g)
+            if g or not w or i.UserInputType~=_KB then return end
+            w = false
+            if i.KeyCode==Enum.KeyCode.Escape then k=nil b.Text="None" else k=i.KeyCode b.Text=k.Name end
+            ss(cb,k)
+        end))
+        local o = {}
+        function o:Set(nk,sl) k=nk b.Text=nk and nk.Name or "None" if not sl then ss(cb,k) end end
+        function o:Get() return k end
+        return o
+    end
+
+    return W
+end
+return AzraelUI
