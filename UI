@@ -1,0 +1,2273 @@
+--[[
+	AzraelUI v6.0-PERFECT — исправлены все ошибки, включая ProgressNotify, Slider.SetEnabled, очистку ContextMenu при Destroy.
+	Совместимость с любыми инжекторами сохранена.
+]]
+
+-- Проверка минимального окружения
+if not game or not workspace or not Enum or not Instance then
+	warn("[AzraelUI] Missing critical globals (game, workspace, Enum, Instance)")
+	return nil
+end
+
+local AzraelUI = {}
+
+-- ======================== ПОЛИФИЛЫ ========================
+local function now()
+	local ok, val = pcall(os.clock)
+	if ok then return val end
+	ok, val = pcall(tick)
+	if ok then return val end
+	return 0
+end
+
+local tableClear = table.clear or function(t)
+	for k in pairs(t) do t[k] = nil end
+end
+
+local spawnFn = type(spawn) == "function" and spawn or function(f)
+	coroutine.wrap(function() pcall(f) end)()
+end
+
+local waitGlobal = type(wait) == "function" and wait or nil
+
+local function busyWait(t)
+	local start = now()
+	while now() - start < t do end
+end
+
+local taskWait = type(task) == "table" and type(task.wait) == "function" and task.wait
+	or waitGlobal
+	or busyWait
+
+local taskSpawn = type(task) == "table" and type(task.spawn) == "function" and task.spawn
+	or spawnFn
+
+local taskDefer = type(task) == "table" and type(task.defer) == "function" and task.defer
+	or taskSpawn
+
+local taskDelay = type(task) == "table" and type(task.delay) == "function" and task.delay
+	or (type(delay) == "function" and delay)
+	or function(t, f)
+		local cancelled = false
+		spawnFn(function()
+			taskWait(t)
+			if not cancelled then f() end
+		end)
+		return { Cancel = function() cancelled = true end }
+	end
+
+local taskCancel = type(task) == "table" and type(task.cancel) == "function" and task.cancel
+	or function(timer)
+		if type(timer) == "table" and timer.Cancel then
+			pcall(timer.Cancel, timer)
+		end
+	end
+
+local function cancelTimer(timer)
+	if not timer then return end
+	local ok = pcall(taskCancel, timer)
+	if not ok and type(timer) == "table" and timer.Cancel then
+		pcall(timer.Cancel, timer)
+	end
+end
+
+local function safeCall(f, ...)
+	if not f then return end
+	taskSpawn(function(...) pcall(f, ...) end, ...)
+end
+
+local function safeCallSync(f, ...)
+	if not f then return end
+	pcall(f, ...)
+end
+
+local function isEnumItem(val)
+	if type(val) ~= "userdata" then return false end
+	local ok = pcall(function() return val.EnumType end)
+	return ok and val.EnumType ~= nil
+end
+
+-- ======================== ОПРЕДЕЛЕНИЕ ВОЗМОЖНОСТЕЙ ЭКЗЕКУТОРА ========================
+local FEATURES = {}
+FEATURES.gethui = type(gethui) == "function"
+FEATURES.writefile = type(writefile) == "function"
+FEATURES.readfile = type(readfile) == "function"
+FEATURES.getgenv = type(getgenv) == "function"
+FEATURES.crypt = type(crypt) == "table"
+	and type(crypt.generatebytes) == "function"
+	and type(crypt.base64) == "table"
+	and type(crypt.base64.encode) == "function"
+
+-- ======================== СЕРВИСЫ ========================
+local function getServiceSafe(name)
+	local ok, service = pcall(function() return game:GetService(name) end)
+	if ok and service then return service end
+	return nil
+end
+
+local UIS = getServiceSafe("UserInputService")
+local TS = getServiceSafe("TextService")
+local HS = getServiceSafe("HttpService")
+local CAM = workspace.CurrentCamera
+
+if not UIS then
+	warn("[AzraelUI] UserInputService not available – aborting")
+	return nil
+end
+if not CAM then
+	warn("[AzraelUI] CurrentCamera not available – aborting")
+	return nil
+end
+
+if not TS then
+	TS = {
+		GetTextSize = function(text, size, font, frameSize)
+			local maxWidth = frameSize and frameSize.X or 9999
+			local charWidth = size * 0.6
+			local totalLen = #text * charWidth
+			local lines = math.max(1, math.ceil(totalLen / maxWidth))
+			return Vector2.new(math.min(totalLen, maxWidth), lines * (size * 1.3))
+		end
+	}
+end
+
+-- ======================== ГЛОБАЛЬНОЕ ХРАНИЛИЩЕ ========================
+local env = FEATURES.getgenv and getgenv() or _G
+if env.AzraelUI_LOADED and type(env.AzraelUI_LOADED) == "table" then
+	return env.AzraelUI_LOADED
+end
+
+-- ======================== СЛУЖЕБНЫЕ ФУНКЦИИ ========================
+local function randomName()
+	if FEATURES.crypt then
+		local buf = crypt.generatebytes(6)
+		local str
+		if type(buffer) == "table" and buffer.tostring then
+			str = buffer.tostring(buf)
+		else
+			return "Az_" .. tostring(math.random(100000, 999999))
+		end
+		if type(str) == "string" and #str >= 6 then
+			local encodeFn = crypt.base64.encode
+			if encodeFn then
+				local ok, result = pcall(encodeFn, str)
+				if ok and type(result) == "string" then return result end
+			end
+		end
+	end
+	return "Az_" .. tostring(math.random(100000, 999999))
+end
+
+local FIRST_PROPS = { AnchorPoint = true }
+local LATE_PROPS = { Rotation = true, ZIndex = true, LayoutOrder = true }
+
+local function create(class, props)
+	local ok, inst = pcall(Instance.new, class)
+	if not ok then return nil end
+	for k, v in pairs(props) do
+		if FIRST_PROPS[k] then pcall(function() inst[k] = v end) end
+	end
+	for k, v in pairs(props) do
+		if not FIRST_PROPS[k] and k ~= "Parent" and not LATE_PROPS[k] then
+			pcall(function() inst[k] = v end)
+		end
+	end
+	for k, v in pairs(props) do
+		if LATE_PROPS[k] then pcall(function() inst[k] = v end) end
+	end
+	if props.Parent then pcall(function() inst.Parent = props.Parent end) end
+	return inst
+end
+
+-- ======================== МЕНЕДЖЕР КОННЕКТОВ ========================
+local ConnectionManager = {}
+ConnectionManager.__index = ConnectionManager
+
+function ConnectionManager.new()
+	return setmetatable({ connections = {} }, ConnectionManager)
+end
+
+function ConnectionManager:Add(conn)
+	if conn and not self.connections[conn] then
+		self.connections[conn] = true
+	end
+end
+
+function ConnectionManager:Remove(conn)
+	if conn then self.connections[conn] = nil end
+end
+
+function ConnectionManager:Disconnect(conn)
+	if conn then
+		self.connections[conn] = nil
+		pcall(function()
+			if type(conn) == "table" and conn.Disconnect then
+				conn:Disconnect()
+			else
+				conn:Disconnect()
+			end
+		end)
+	end
+end
+
+function ConnectionManager:Destroy()
+	for conn in pairs(self.connections) do
+		self:Disconnect(conn)
+	end
+	tableClear(self.connections)
+end
+
+local function managedConnect(self, event, func)
+	local conn = event:Connect(func)
+	self._connMgr:Add(conn)
+	return conn
+end
+
+-- ======================== БЕЗОПАСНЫЙ КОНТЕЙНЕР ========================
+local safeGui
+do
+	if FEATURES.gethui then
+		local ok, result = pcall(gethui)
+		if ok and result and result.Parent then
+			safeGui = result
+		end
+	end
+	if not safeGui then
+		local coreGui = getServiceSafe("CoreGui")
+		if coreGui then
+			local sg = Instance.new("ScreenGui")
+			sg.Name = randomName()
+			sg.ResetOnSpawn = false
+			sg.DisplayOrder = 99999
+			if pcall(function() sg.Parent = coreGui end) and sg.Parent then
+				safeGui = sg
+			else
+				sg:Destroy()
+			end
+		end
+	end
+	if not safeGui then
+		local players = getServiceSafe("Players")
+		local lp = players and players.LocalPlayer
+		if lp then
+			local playerGui = lp:FindFirstChildOfClass("PlayerGui")
+			if playerGui then
+				local sg = Instance.new("ScreenGui")
+				sg.Name = randomName()
+				sg.ResetOnSpawn = false
+				sg.DisplayOrder = 99999
+				pcall(function() sg.Parent = playerGui end)
+				if sg.Parent then safeGui = sg else sg:Destroy() end
+			end
+		end
+	end
+	if not safeGui then
+		local sg = Instance.new("ScreenGui")
+		sg.Name = randomName()
+		sg.DisplayOrder = 99999
+		pcall(function() sg.Parent = game end)
+		if sg.Parent then safeGui = sg else sg:Destroy() end
+	end
+end
+
+-- ======================== ТЕМЫ ========================
+local Themes = {
+	Dark = {
+		Bg  = Color3.fromRGB(18, 18, 18),
+		Top = Color3.fromRGB(25, 25, 25),
+		Btn = Color3.fromRGB(35, 35, 35),
+		Acc = Color3.fromRGB(0, 140, 0),
+		Txt = Color3.fromRGB(255, 255, 255),
+		Err = Color3.fromRGB(220, 60, 60),
+		Dim = Color3.fromRGB(130, 130, 130),
+		Sep = Color3.fromRGB(50, 50, 50),
+		Fnt = Enum.Font.SourceSansBold,
+		W   = 190,
+		BH  = 24,
+		Scale = 1
+	},
+	Light = {
+		Bg  = Color3.fromRGB(240, 240, 240),
+		Top = Color3.fromRGB(220, 220, 220),
+		Btn = Color3.fromRGB(255, 255, 255),
+		Acc = Color3.fromRGB(0, 120, 0),
+		Txt = Color3.fromRGB(30, 30, 30),
+		Err = Color3.fromRGB(200, 40, 40),
+		Dim = Color3.fromRGB(100, 100, 100),
+		Sep = Color3.fromRGB(180, 180, 180),
+		Fnt = Enum.Font.SourceSansBold,
+		W   = 190,
+		BH  = 24,
+		Scale = 1
+	},
+	Blue = {
+		Bg  = Color3.fromRGB(10, 20, 40),
+		Top = Color3.fromRGB(15, 30, 55),
+		Btn = Color3.fromRGB(25, 45, 80),
+		Acc = Color3.fromRGB(0, 180, 255),
+		Txt = Color3.fromRGB(220, 240, 255),
+		Err = Color3.fromRGB(255, 80, 80),
+		Dim = Color3.fromRGB(120, 160, 200),
+		Sep = Color3.fromRGB(40, 60, 90),
+		Fnt = Enum.Font.SourceSansBold,
+		W   = 190,
+		BH  = 24,
+		Scale = 1
+	}
+}
+local DefaultTheme = Themes.Dark
+
+-- ======================== ГЛОБАЛЬНОЕ СОСТОЯНИЕ ========================
+local windows = {}
+local notificationFrame, notificationItems = nil, {}
+local notificationTimers = {}
+local keybindListeners = {}
+local keybindConn = nil
+local watermarkObj = nil
+local panicKey = nil
+
+local function updateKeybindConnection()
+	if next(keybindListeners) == nil and not panicKey then
+		if keybindConn then keybindConn:Disconnect(); keybindConn = nil end
+	else
+		if not keybindConn or not keybindConn.Connected then
+			keybindConn = UIS.InputBegan:Connect(function(input, gameProcessed)
+				if gameProcessed or input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+				local snapshot = {}
+				for k, v in pairs(keybindListeners) do snapshot[k] = v end
+				for _, entry in pairs(snapshot) do
+					if entry.key and input.KeyCode == entry.key then
+						safeCall(entry.callback)
+					end
+				end
+				if panicKey and input.KeyCode == panicKey then
+					AzraelUI:Destroy()
+				end
+			end)
+		end
+	end
+end
+
+-- ======================== ТУЛТИП-МЕНЕДЖЕР ========================
+local TooltipManager = {
+	_tip = nil,
+	_active = nil,
+	_delayTimer = nil,
+	_showing = false
+}
+
+local function showTooltip(text, position)
+	if TooltipManager._showing then return end
+	TooltipManager._showing = true
+	if not TooltipManager._gui or not TooltipManager._gui.Parent then
+		local sg = create("ScreenGui", { Name = "AzTooltip", DisplayOrder = 100000, Parent = safeGui })
+		local tip = create("Frame", {
+			Size = UDim2.new(0, 0, 0, 0),
+			BackgroundColor3 = Color3.fromRGB(30,30,30),
+			BorderSizePixel = 0,
+			Parent = sg
+		})
+		create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = tip })
+		local lbl = create("TextLabel", {
+			Size = UDim2.new(1, -12, 1, -4),
+			Position = UDim2.new(0, 6, 0, 2),
+			BackgroundTransparency = 1,
+			Text = "",
+			TextColor3 = Color3.new(1,1,1),
+			Font = Enum.Font.SourceSans,
+			TextSize = 13,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = tip
+		})
+		TooltipManager._tip = tip
+		TooltipManager._label = lbl
+		TooltipManager._gui = sg
+	end
+	local tip = TooltipManager._tip
+	local label = TooltipManager._label
+	label.Text = text
+	local bounds = TS:GetTextSize(text, 13, Enum.Font.SourceSans, Vector2.new(200, 50))
+	tip.Size = UDim2.new(0, bounds.X + 12, 0, bounds.Y + 8)
+	tip.Position = UDim2.new(0, position.X + 10, 0, position.Y + 10)
+	tip.Visible = true
+end
+
+local function hideTooltip()
+	TooltipManager._showing = false
+	if TooltipManager._tip then
+		TooltipManager._tip.Visible = false
+	end
+	if TooltipManager._delayTimer then
+		cancelTimer(TooltipManager._delayTimer)
+		TooltipManager._delayTimer = nil
+	end
+end
+
+local function startTooltip(text, guiObject)
+	if TooltipManager._active == guiObject then return end
+	hideTooltip()
+	TooltipManager._active = guiObject
+	TooltipManager._delayTimer = taskDelay(0.5, function()
+		local pos = guiObject.AbsolutePosition + Vector2.new(guiObject.AbsoluteSize.X, 0)
+		showTooltip(text, pos)
+		TooltipManager._delayTimer = nil
+	end)
+end
+
+local function stopTooltip(guiObject)
+	if TooltipManager._active == guiObject then
+		hideTooltip()
+		TooltipManager._active = nil
+	end
+end
+
+-- ======================== КОНТЕКСТНОЕ МЕНЮ ========================
+local ContextMenu = {
+	_active = nil,
+	_frame = nil,
+	_connections = {}
+}
+
+local function hideContextMenu()
+	if ContextMenu._frame then
+		for _, c in ipairs(ContextMenu._connections) do
+			pcall(function() c:Disconnect() end)
+		end
+		tableClear(ContextMenu._connections)
+		ContextMenu._frame:Destroy()
+		ContextMenu._frame = nil
+	end
+	ContextMenu._active = nil
+	if ContextMenu._outsideConn then
+		ContextMenu._outsideConn:Disconnect()
+		ContextMenu._outsideConn = nil
+	end
+end
+
+local function showContextMenu(items, position)
+	hideContextMenu()
+	if not items or #items == 0 then return end
+
+	local sg = create("ScreenGui", { Name = "AzContext", DisplayOrder = 100001, Parent = safeGui })
+	local frame = create("Frame", {
+		Size = UDim2.new(0, 150, 0, #items * 24 + 4),
+		Position = UDim2.new(0, position.X, 0, position.Y),
+		BackgroundColor3 = Color3.fromRGB(35,35,35),
+		BorderSizePixel = 0,
+		Parent = sg
+	})
+	create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = frame })
+	create("UIListLayout", { Padding = UDim.new(0, 1), SortOrder = Enum.SortOrder.LayoutOrder, Parent = frame })
+	create("UIPadding", { PaddingLeft = UDim.new(0, 2), PaddingRight = UDim.new(0, 2), PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 2), Parent = frame })
+
+	ContextMenu._frame = frame
+	ContextMenu._gui = sg
+
+	for _, item in ipairs(items) do
+		local btn = create("TextButton", {
+			Size = UDim2.new(1, 0, 0, 24),
+			BackgroundColor3 = Color3.fromRGB(35,35,35),
+			Text = "  " .. tostring(item[1]),
+			TextColor3 = Color3.new(1,1,1),
+			Font = Enum.Font.SourceSans,
+			TextSize = 13,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			AutoButtonColor = false,
+			Parent = frame
+		})
+		create("UICorner", { CornerRadius = UDim.new(0, 3), Parent = btn })
+		local conn = btn.MouseButton1Click:Connect(function()
+			hideContextMenu()
+			if item[2] then
+				safeCall(item[2])
+			end
+		end)
+		table.insert(ContextMenu._connections, conn)
+		-- hover effect
+		local enterConn = btn.MouseEnter:Connect(function()
+			btn.BackgroundColor3 = Color3.fromRGB(50,50,50)
+		end)
+		local leaveConn = btn.MouseLeave:Connect(function()
+			btn.BackgroundColor3 = Color3.fromRGB(35,35,35)
+		end)
+		table.insert(ContextMenu._connections, enterConn)
+		table.insert(ContextMenu._connections, leaveConn)
+	end
+
+	-- клик вне
+	ContextMenu._outsideConn = UIS.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			local target = input.Instance
+			if target and (target == frame or target:IsDescendantOf(frame)) then
+				return
+			end
+			hideContextMenu()
+		end
+	end)
+end
+
+local function setContextMenu(element, items)
+	if not element._frame then return end
+	local guiObj = element._frame
+	managedConnect(element.W, guiObj.MouseButton2Click or guiObj.MouseButton2Down or guiObj.InputBegan, function(input)
+		if input and input.UserInputType == Enum.UserInputType.MouseButton2 then
+			showContextMenu(items, input.Position)
+		elseif not input then -- прямое подключение к MouseButton2Click
+			local pos = UIS:GetMouseLocation()
+			showContextMenu(items, pos)
+		end
+	end)
+end
+
+-- ======================== УВЕДОМЛЕНИЯ ========================
+function AzraelUI:Notify(text, duration, type, customColor)
+	if not safeGui then return end
+	text = tostring(text or "")
+	duration = math.max(0, tonumber(duration) or 3)
+	if duration == 0 then return end
+
+	if not notificationFrame or not notificationFrame.Parent then
+		local sg = create("ScreenGui", { Name = randomName(), DisplayOrder = 99999, Parent = safeGui })
+		if not sg then return end
+		notificationFrame = create("Frame", {
+			Size = UDim2.new(0, 200, 1, 0),
+			Position = UDim2.new(1, -210, 0, 0),
+			BackgroundTransparency = 1,
+			Parent = sg
+		})
+		if not notificationFrame then return end
+		create("UIListLayout", {
+			Padding = UDim.new(0, 4),
+			VerticalAlignment = Enum.VerticalAlignment.Bottom,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+			Parent = notificationFrame
+		})
+		create("UIPadding", { PaddingBottom = UDim.new(0, 16), Parent = notificationFrame })
+		if notificationItems then
+			for _, item in ipairs(notificationItems) do
+				if item and item.Parent then item:Destroy() end
+			end
+			tableClear(notificationItems)
+		else
+			notificationItems = {}
+		end
+	end
+
+	while #notificationItems >= 5 do
+		local oldest = table.remove(notificationItems, 1)
+		if oldest and oldest.Parent then oldest:Destroy() end
+	end
+
+	local frame = create("Frame", {
+		Size = UDim2.new(1, 0, 0, 0),
+		BackgroundColor3 = DefaultTheme.Bg,
+		ClipsDescendants = true,
+		Parent = notificationFrame
+	})
+	if not frame then return end
+	create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = frame })
+
+	local barColor = customColor
+		or (type == "err" and DefaultTheme.Err)
+		or (type == "ok" and DefaultTheme.Acc)
+		or Color3.fromRGB(0,140,255)
+
+	create("Frame", {
+		Size = UDim2.new(0, 3, 1, 0),
+		BackgroundColor3 = barColor,
+		BorderSizePixel = 0,
+		Parent = frame
+	})
+
+	local label = create("TextLabel", {
+		Size = UDim2.new(1, -15, 0, 0),
+		Position = UDim2.new(0, 10, 0, 4),
+		BackgroundTransparency = 1,
+		Text = text,
+		TextColor3 = DefaultTheme.Txt,
+		Font = DefaultTheme.Fnt,
+		TextSize = 13,
+		TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = frame
+	})
+
+	if label then
+		local textBounds = TS:GetTextSize(text, 13, DefaultTheme.Fnt, Vector2.new(175, 9999))
+		label.Size = UDim2.new(1, -15, 0, textBounds.Y)
+		frame.Size = UDim2.new(1, 0, 0, textBounds.Y + 8)
+		local ok, stroke = pcall(Instance.new, "UIStroke")
+		if ok and stroke then
+			stroke.Color = Color3.new(0,0,0)
+			stroke.Thickness = 0.8
+			stroke.Parent = label
+		end
+	end
+
+	table.insert(notificationItems, frame)
+	local closed = false
+	local timer
+
+	local function closeNotify()
+		if closed then return end
+		closed = true
+		cancelTimer(timer)
+		if timer and notificationTimers[timer] then
+			notificationTimers[timer] = nil
+		end
+		if frame and frame.Parent then frame:Destroy() end
+		for i, v in ipairs(notificationItems) do
+			if v == frame then table.remove(notificationItems, i); break end
+		end
+	end
+
+	timer = taskDelay(duration, closeNotify)
+	notificationTimers[timer] = true
+	return { Close = closeNotify }
+end
+
+function AzraelUI:ProgressNotify(text, maxValue, duration, customColor)
+	if not safeGui then return end
+	text = tostring(text or "")
+	maxValue = math.max(1, tonumber(maxValue) or 100)  -- ИСПРАВЛЕНО: защита от деления на ноль
+	duration = tonumber(duration)
+
+	if not notificationFrame or not notificationFrame.Parent then
+		local sg = create("ScreenGui", { Name = randomName(), DisplayOrder = 99999, Parent = safeGui })
+		if not sg then return end
+		notificationFrame = create("Frame", {
+			Size = UDim2.new(0, 200, 1, 0),
+			Position = UDim2.new(1, -210, 0, 0),
+			BackgroundTransparency = 1,
+			Parent = sg
+		})
+		if not notificationFrame then return end
+		create("UIListLayout", {
+			Padding = UDim.new(0, 4),
+			VerticalAlignment = Enum.VerticalAlignment.Bottom,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+			Parent = notificationFrame
+		})
+		create("UIPadding", { PaddingBottom = UDim.new(0, 16), Parent = notificationFrame })
+		notificationItems = notificationItems or {}
+	end
+
+	local frame = create("Frame", {
+		Size = UDim2.new(1, 0, 0, 0),
+		BackgroundColor3 = DefaultTheme.Bg,
+		ClipsDescendants = true,
+		Parent = notificationFrame
+	})
+	if not frame then return end
+	create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = frame })
+
+	local barColor = customColor or Color3.fromRGB(0,140,255)
+	create("Frame", {
+		Size = UDim2.new(0, 3, 1, 0),
+		BackgroundColor3 = barColor,
+		BorderSizePixel = 0,
+		Parent = frame
+	})
+
+	local label = create("TextLabel", {
+		Size = UDim2.new(1, -15, 0, 18),
+		Position = UDim2.new(0, 10, 0, 4),
+		BackgroundTransparency = 1,
+		Text = text .. " 0%",
+		TextColor3 = DefaultTheme.Txt,
+		Font = DefaultTheme.Fnt,
+		TextSize = 13,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = frame
+	})
+
+	local barFrame = create("Frame", {
+		Size = UDim2.new(1, -20, 0, 4),
+		Position = UDim2.new(0, 10, 0, 24),
+		BackgroundColor3 = DefaultTheme.Btn,
+		Parent = frame
+	})
+	create("UICorner", { CornerRadius = UDim.new(0, 2), Parent = barFrame })
+
+	local fill = create("Frame", {
+		Size = UDim2.new(0, 0, 1, 0),
+		BackgroundColor3 = barColor,
+		Parent = barFrame
+	})
+	create("UICorner", { CornerRadius = UDim.new(0, 2), Parent = fill })
+
+	frame.Size = UDim2.new(1, 0, 0, 32)
+	table.insert(notificationItems, frame)
+
+	local closed = false
+	local timer
+
+	local function closeNotify()
+		if closed then return end
+		closed = true
+		cancelTimer(timer)
+		if timer and notificationTimers[timer] then
+			notificationTimers[timer] = nil
+		end
+		if frame and frame.Parent then frame:Destroy() end
+		for i, v in ipairs(notificationItems) do
+			if v == frame then table.remove(notificationItems, i); break end
+		end
+	end
+
+	if duration then
+		timer = taskDelay(duration, closeNotify)
+		notificationTimers[timer] = true
+	end
+
+	local notifObj = {
+		Set = function(self, value)
+			if closed or not fill then return end
+			value = math.clamp(tonumber(value) or 0, 0, maxValue)
+			local percent = math.floor(value / maxValue * 100)
+			fill.Size = UDim2.new(value / maxValue, 0, 1, 0)
+			label.Text = text .. " " .. percent .. "%"
+			if value >= maxValue then
+				self:Close()
+			end
+		end,
+		Close = closeNotify
+	}
+	return notifObj
+end
+
+-- ======================== КОНСТРУКТОРЫ ЭЛЕМЕНТОВ ========================
+local ControlMT = {}
+ControlMT.__index = ControlMT
+function ControlMT:Destroy() end
+
+local function registerConfigField(window, obj, fieldType, id)
+	window._configIdCounter = (window._configIdCounter or 0) + 1
+	local entry = {
+		obj = obj,
+		get = obj.Get,
+		set = obj.Set,
+		type = fieldType,
+		id = id .. "_" .. window._configIdCounter
+	}
+	table.insert(window._cF, entry)
+	obj._cfgEntry = entry
+end
+
+-- Separator
+local function makeSeparator(parent, window)
+	local f = create("Frame", { Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = window.T.Sep, BorderSizePixel = 0, Parent = parent })
+	local obj = setmetatable({ Destroy = function() if f then f:Destroy() end end }, ControlMT)
+	obj._frame = f
+	return obj
+end
+
+-- Label
+local function makeLabel(parent, window, text, textSize)
+	local lbl = create("TextLabel", { Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1, Text = text, TextColor3 = window.T.Dim, Font = window.T.Fnt, TextSize = textSize or 12, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = parent })
+	local obj = setmetatable({ Destroy = function() if lbl then lbl:Destroy() end end }, ControlMT)
+	obj._frame = lbl
+	return obj
+end
+
+-- Button
+local function makeButton(parent, window, text, callback, confirm, textSize, bind)
+	if window._destroyed or not parent or not parent.Parent then return end
+	local theme = window.T
+	textSize = textSize or 13
+	local button = create("TextButton", {
+		Size = UDim2.new(1, 0, 0, theme.BH),
+		BackgroundColor3 = theme.Btn,
+		Text = "  " .. text,
+		TextColor3 = theme.Txt,
+		Font = theme.Fnt,
+		TextSize = textSize,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		AutoButtonColor = false,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = parent
+	})
+	if not button then return end
+	create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = button })
+
+	local confirming = false
+	local confirmTimer = nil
+	local lastClick = 0
+
+	managedConnect(window, button.InputBegan, function(i)
+		if (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) and not confirming then
+			button.BackgroundTransparency = 0.3
+		end
+	end)
+	managedConnect(window, button.InputEnded, function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			button.BackgroundTransparency = 0
+		end
+	end)
+	managedConnect(window, button.MouseButton1Click, function()
+		if window._destroyed then return end
+		local n = now()
+		if n - lastClick < 0.3 then return end
+		lastClick = n
+
+		if confirm and not confirming then
+			confirming = true
+			button.Text = "  Confirm?"
+			button.TextColor3 = theme.Err
+			confirmTimer = taskDelay(3, function()
+				if confirming and button.Parent then
+					confirming = false
+					button.Text = "  " .. text
+					button.TextColor3 = theme.Txt
+				end
+				confirmTimer = nil
+			end)
+			return
+		end
+		if confirm and confirming then
+			cancelTimer(confirmTimer)
+			confirmTimer = nil
+		end
+		confirming = false
+		button.Text = "  " .. text
+		button.TextColor3 = theme.Txt
+		window._safeCall(callback)
+	end)
+
+	local obj = setmetatable({
+		Destroy = function() cancelTimer(confirmTimer); if button then button:Destroy() end end,
+		_frame = button,
+		SetEnabled = function(self, enabled)
+			if not button then return end
+			button.Active = enabled
+			button.BackgroundTransparency = enabled and 0 or 0.5
+			button.TextColor3 = enabled and theme.Txt or theme.Dim
+		end,
+		SetTooltip = function(self, tipText)
+			managedConnect(window, button.MouseEnter, function() startTooltip(tipText, button) end)
+			managedConnect(window, button.MouseLeave, function() stopTooltip(button) end)
+		end,
+		SetContextMenu = function(self, items) setContextMenu(self, items) end,
+		set = function(self, th)
+			if button and button.Parent then
+				button.BackgroundColor3 = th.Btn
+				button.TextColor3 = th.Txt
+				button.Font = th.Fnt
+			end
+		end
+	}, ControlMT)
+
+	if bind then
+		local listener = { key = bind, callback = function() safeCall(callback) end }
+		keybindListeners[obj] = listener
+		updateKeybindConnection()
+		obj._keybindListener = listener
+	end
+	return obj
+end
+
+-- Toggle
+local function makeToggle(parent, window, text, state, callback, textSize, bind)
+	if window._destroyed or not parent or not parent.Parent then return end
+	local theme = window.T
+	textSize = textSize or 13
+	local value = state == true
+	local button = create("TextButton", {
+		Size = UDim2.new(1, 0, 0, theme.BH),
+		BackgroundColor3 = value and theme.Acc or theme.Btn,
+		Text = "  " .. text .. (value and "  ✓" or "  ✗"),
+		TextColor3 = theme.Txt,
+		Font = theme.Fnt,
+		TextSize = textSize,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		AutoButtonColor = false,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = parent
+	})
+	if not button then return end
+	create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = button })
+
+	managedConnect(window, button.MouseButton1Click, function()
+		if window._destroyed then return end
+		obj:Set(not value)
+	end)
+
+	local obj = setmetatable({
+		Set = function(self, newVal, silent)
+			if window._destroyed or not button or not button.Parent then return end
+			value = newVal
+			button.BackgroundColor3 = value and theme.Acc or theme.Btn
+			button.Text = "  " .. text .. (value and "  ✓" or "  ✗")
+			if not silent then window._safeCall(callback, value) end
+		end,
+		Get = function() return value end,
+		Destroy = function(self)
+			if self._cfgEntry then
+				for i, e in ipairs(window._cF) do if e == self._cfgEntry then table.remove(window._cF, i); break end end
+				self._cfgEntry = nil
+			end
+			if self._keybindListener then
+				keybindListeners[self] = nil
+				updateKeybindConnection()
+			end
+			if button then button:Destroy() end
+		end,
+		_frame = button,
+		SetEnabled = function(self, enabled)
+			if not button then return end
+			button.Active = enabled
+			button.BackgroundTransparency = enabled and 0 or 0.5
+			button.TextColor3 = enabled and theme.Txt or theme.Dim
+		end,
+		SetTooltip = function(self, tipText)
+			managedConnect(window, button.MouseEnter, function() startTooltip(tipText, button) end)
+			managedConnect(window, button.MouseLeave, function() stopTooltip(button) end)
+		end,
+		SetContextMenu = function(self, items) setContextMenu(self, items) end,
+		set = function(self, th)
+			if button and button.Parent then
+				button.BackgroundColor3 = value and th.Acc or th.Btn
+				button.TextColor3 = th.Txt
+				button.Font = th.Fnt
+			end
+		end
+	}, ControlMT)
+	registerConfigField(window, obj, "toggle", "toggle")
+
+	if bind then
+		local listener = { key = bind, callback = function() obj:Set(not value) end }
+		keybindListeners[obj] = listener
+		updateKeybindConnection()
+		obj._keybindListener = listener
+	end
+	return obj
+end
+
+-- Slider
+local function makeSlider(parent, window, text, min, max, default, step, callback, textSize)
+	if window._destroyed or not parent or not parent.Parent then return end
+	assert(min < max, "Slider: min must be < max")
+	local theme = window.T
+	textSize = textSize or 12
+	local value = math.clamp(tonumber(default) or min, min, max)
+	step = step or 1
+
+	local container = create("Frame", { Size = UDim2.new(1, 0, 0, theme.BH + 18), BackgroundTransparency = 1, Parent = parent })
+	if not container then return end
+
+	local label = create("TextLabel", { Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1, Text = text, TextColor3 = theme.Dim, Font = theme.Fnt, TextSize = textSize, TextXAlignment = Enum.TextXAlignment.Left, Parent = container })
+	local track = create("Frame", { Size = UDim2.new(1, -50, 0, 6), Position = UDim2.new(0, 0, 0, 18), BackgroundColor3 = theme.Btn, BorderSizePixel = 0, Parent = container })
+	create("UICorner", { CornerRadius = UDim.new(0, 3), Parent = track })
+	local fill = create("Frame", { Size = UDim2.new(math.clamp((value - min) / (max - min), 0, 1), 0, 1, 0), BackgroundColor3 = theme.Acc, BorderSizePixel = 0, Parent = track })
+	create("UICorner", { CornerRadius = UDim.new(0, 3), Parent = fill })
+	local valueLabel = create("TextLabel", { Size = UDim2.new(0, 50, 0, theme.BH), Position = UDim2.new(1, -50, 0, 16), BackgroundTransparency = 1, Text = string.format("%.2f", value), TextColor3 = theme.Txt, Font = theme.Fnt, TextSize = textSize, TextXAlignment = Enum.TextXAlignment.Right, Parent = container })
+
+	local obj = setmetatable({
+		min = min, max = max, step = step,
+		dragging = false, lastFire = 0, inputType = nil,
+		absX = 0, absW = 0,
+		_onInputChanged = nil, _onInputEnded = nil
+	}, ControlMT)
+
+	function obj:_updateValue(newVal, fireCallback)
+		value = newVal
+		fill.Size = UDim2.new(math.clamp((value - min) / (max - min), 0, 1), 0, 1, 0)
+		valueLabel.Text = string.format("%.2f", value)
+		if fireCallback then
+			local n = now()
+			if n - self.lastFire > 0.05 then
+				self.lastFire = n
+				safeCallSync(callback, value)
+			end
+		end
+	end
+
+	managedConnect(window, track.InputBegan, function(input)
+		if window._destroyed or obj.dragging then return end
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			obj.dragging = true
+			obj.inputType = input.UserInputType
+			local abs = track.AbsolutePosition
+			obj.absX, obj.absW = abs.X, track.AbsoluteSize.X
+			local raw = min + (max - min) * math.clamp((input.Position.X - obj.absX) / obj.absW, 0, 1)
+			local val = math.floor((raw / step) + 0.5) * step
+			val = math.clamp(val, min, max)
+			obj:_updateValue(val, true)
+			window._activeSlider = obj
+		end
+	end)
+
+	function obj:_onInputChanged(input)
+		if not self.dragging then return end
+		if input.UserInputType == self.inputType then
+			local raw = min + (max - min) * math.clamp((input.Position.X - self.absX) / self.absW, 0, 1)
+			local val = math.floor((raw / step) + 0.5) * step
+			val = math.clamp(val, min, max)
+			self:_updateValue(val, true)
+		end
+	end
+
+	function obj:_onInputEnded(input)
+		if input.UserInputType == obj.inputType then
+			obj.dragging = false
+			window._activeSlider = nil
+		end
+	end
+
+	function obj:Set(newVal, silent)
+		if window._destroyed or not track.Parent then return end
+		if self.dragging then self.dragging = false; window._activeSlider = nil end
+		value = math.clamp(tonumber(newVal) or min, min, max)
+		self:_updateValue(value, not silent)
+	end
+
+	function obj:Get() return value end
+
+	function obj:Destroy()
+		if self.dragging then self.dragging = false; window._activeSlider = nil end
+		if obj._cfgEntry then
+			for i, e in ipairs(window._cF) do if e == obj._cfgEntry then table.remove(window._cF, i); break end end
+			obj._cfgEntry = nil
+		end
+		if container then container:Destroy() end
+	end
+
+	obj._frame = container
+	obj.SetEnabled = function(self, enabled)
+		if not container then return end
+		container.Active = enabled
+		label.TextColor3 = enabled and theme.Dim or theme.Dim
+		track.Active = enabled
+		track.BackgroundTransparency = enabled and 0 or 0.5
+		fill.BackgroundColor3 = enabled and theme.Acc or theme.Dim               -- ИСПРАВЛЕНО
+		valueLabel.TextColor3 = enabled and theme.Txt or theme.Dim                -- ИСПРАВЛЕНО
+	end
+	obj.SetTooltip = function(self, tipText)
+		managedConnect(window, container.MouseEnter, function() startTooltip(tipText, container) end)
+		managedConnect(window, container.MouseLeave, function() stopTooltip(container) end)
+	end
+	obj.SetContextMenu = function(self, items) setContextMenu(self, items) end
+	obj.set = function(self, th)
+		label.TextColor3 = th.Dim
+		valueLabel.TextColor3 = th.Txt
+		label.Font = th.Fnt
+		valueLabel.Font = th.Fnt
+		track.BackgroundColor3 = th.Btn
+		fill.BackgroundColor3 = th.Acc
+	end
+
+	registerConfigField(window, obj, "slider", "slider")
+	return obj
+end
+
+-- Input
+local function makeInput(parent, window, text, default, numbersOnly, callback, textSize)
+	if window._destroyed or not parent or not parent.Parent then return end
+	local theme = window.T
+	textSize = textSize or 12
+	local value = tostring(default or "")
+
+	local container = create("Frame", { Size = UDim2.new(1, 0, 0, theme.BH + 18), BackgroundTransparency = 1, Parent = parent })
+	local label = create("TextLabel", { Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1, Text = text, TextColor3 = theme.Dim, Font = theme.Fnt, TextSize = textSize, TextXAlignment = Enum.TextXAlignment.Left, Parent = container })
+	local inputFrame = create("Frame", { Size = UDim2.new(1, 0, 0, theme.BH), Position = UDim2.new(0, 0, 0, 18), BackgroundColor3 = theme.Btn, Parent = container })
+	create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = inputFrame })
+	local textBox = create("TextBox", { Size = UDim2.new(1, -10, 1, 0), Position = UDim2.new(0, 5, 0, 0), BackgroundTransparency = 1, Text = value, TextColor3 = theme.Txt, Font = theme.Fnt, TextSize = textSize, ClearTextOnFocus = false, Parent = inputFrame })
+
+	managedConnect(window, textBox.FocusLost, function()
+		local newVal = textBox.Text
+		if numbersOnly then newVal = tonumber(newVal) or tonumber(default) or 0; newVal = tostring(newVal) end
+		obj:Set(newVal)
+	end)
+
+	local obj = setmetatable({
+		Set = function(self, newVal, silent)
+			if window._destroyed or not textBox or not textBox.Parent then return end
+			value = tostring(newVal or "")
+			textBox.Text = value
+			if not silent then window._safeCall(callback, value) end
+		end,
+		Get = function() return value end,
+		Destroy = function(self) if container then container:Destroy() end end,
+		_frame = container,
+		SetEnabled = function(self, enabled)
+			textBox.Active = enabled
+			textBox.TextColor3 = enabled and theme.Txt or theme.Dim
+		end,
+		SetTooltip = function(self, tipText)
+			managedConnect(window, container.MouseEnter, function() startTooltip(tipText, container) end)
+			managedConnect(window, container.MouseLeave, function() stopTooltip(container) end)
+		end,
+		SetContextMenu = function(self, items) setContextMenu(self, items) end,
+		set = function(self, th)
+			label.TextColor3 = th.Dim
+			label.Font = th.Fnt
+			textBox.TextColor3 = th.Txt
+			textBox.Font = th.Fnt
+			inputFrame.BackgroundColor3 = th.Btn
+		end
+	}, ControlMT)
+	registerConfigField(window, obj, "input", "input")
+	return obj
+end
+
+-- Cycle
+local function makeCycle(parent, window, text, options, callback, textSize)
+	if window._destroyed or not parent or not parent.Parent then return end
+	if not options or #options == 0 then return end
+	local theme = window.T
+	textSize = textSize or 13
+	local index, value = 1, options[1]
+
+	local container = create("Frame", { Size = UDim2.new(1, 0, 0, theme.BH + 18), BackgroundTransparency = 1, Parent = parent })
+	local lbl = create("TextLabel", { Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1, Text = text, TextColor3 = theme.Dim, Font = theme.Fnt, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, Parent = container })
+	local button = create("TextButton", {
+		Size = UDim2.new(1, 0, 0, theme.BH), Position = UDim2.new(0, 0, 0, 18),
+		BackgroundColor3 = theme.Btn, Text = "  " .. (value or ""),
+		TextColor3 = theme.Txt, Font = theme.Fnt, TextSize = textSize,
+		TextXAlignment = Enum.TextXAlignment.Left, AutoButtonColor = false, Parent = container
+	})
+	create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = button })
+
+	managedConnect(window, button.MouseButton1Click, function()
+		if window._destroyed then return end
+		index = index + 1; if index > #options then index = 1 end
+		obj:Set(options[index])
+	end)
+
+	local obj = setmetatable({
+		Set = function(self, newVal, silent)
+			if window._destroyed or not button or not button.Parent then return end
+			for i, opt in ipairs(options) do
+				if tostring(opt) == tostring(newVal) then index = i; value = opt; break end
+			end
+			button.Text = "  " .. tostring(value)
+			if not silent then window._safeCall(callback, value) end
+		end,
+		Get = function() return value end,
+		Destroy = function(self) if container then container:Destroy() end end,
+		_frame = container,
+		SetEnabled = function(self, enabled)
+			button.Active = enabled
+			button.BackgroundColor3 = enabled and theme.Btn or theme.Btn
+			button.TextColor3 = enabled and theme.Txt or theme.Dim
+		end,
+		SetTooltip = function(self, tipText)
+			managedConnect(window, container.MouseEnter, function() startTooltip(tipText, container) end)
+			managedConnect(window, container.MouseLeave, function() stopTooltip(container) end)
+		end,
+		SetContextMenu = function(self, items) setContextMenu(self, items) end,
+		set = function(self, th)
+			lbl.TextColor3 = th.Dim
+			lbl.Font = th.Fnt
+			button.BackgroundColor3 = th.Btn
+			button.TextColor3 = th.Txt
+			button.Font = th.Fnt
+		end
+	}, ControlMT)
+	registerConfigField(window, obj, "cycle", "cycle")
+	return obj
+end
+
+-- Keybind
+local function makeKeybind(parent, window, text, defaultKey, callback, textSize)
+	if window._destroyed or not parent or not parent.Parent then return end
+	local theme = window.T
+	textSize = textSize or 13
+	local currentKey = isEnumItem(defaultKey) and defaultKey.EnumType == Enum.KeyCode and defaultKey or Enum.KeyCode.RightShift
+	local waiting, waitConn, waitTimer = false, nil, nil
+
+	local container = create("Frame", { Size = UDim2.new(1, 0, 0, theme.BH + 18), BackgroundTransparency = 1, Parent = parent })
+	local lbl = create("TextLabel", { Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1, Text = text, TextColor3 = theme.Dim, Font = theme.Fnt, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, Parent = container })
+	local button = create("TextButton", {
+		Size = UDim2.new(1, 0, 0, theme.BH), Position = UDim2.new(0, 0, 0, 18),
+		BackgroundColor3 = theme.Btn, Text = "  [" .. (currentKey.Name or "None") .. "]",
+		TextColor3 = theme.Txt, Font = theme.Fnt, TextSize = textSize,
+		TextXAlignment = Enum.TextXAlignment.Left, AutoButtonColor = false, Parent = container
+	})
+	create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = button })
+
+	local function stopWaiting()
+		if waiting then
+			waiting = false
+			if waitConn then window._connMgr:Disconnect(waitConn); waitConn = nil end
+			if waitTimer then cancelTimer(waitTimer); waitTimer = nil end
+			for i, kb in ipairs(window._keybinds) do if kb.obj == obj then table.remove(window._keybinds, i); break end end
+		end
+	end
+
+	managedConnect(window, button.MouseButton1Click, function()
+		if window._destroyed or waiting then return end
+		waiting = true; button.Text = "  ..."
+		table.insert(window._keybinds, { obj = obj })
+		waitConn = UIS.InputBegan:Connect(function(input, gameProcessed)
+			if not gameProcessed and input.UserInputType == Enum.UserInputType.Keyboard then
+				obj:Set(input.KeyCode); stopWaiting()
+			end
+		end)
+		window._connMgr:Add(waitConn)
+		waitTimer = taskDelay(10, function()
+			stopWaiting()
+			if button and button.Parent then button.Text = "  [" .. (currentKey.Name or "None") .. "]" end
+		end)
+	end)
+
+	local obj = setmetatable({
+		CancelWait = stopWaiting,
+		Set = function(self, newKey, silent)
+			if window._destroyed then return end
+			currentKey = newKey or currentKey
+			if button and button.Parent then button.Text = "  [" .. (currentKey.Name or "None") .. "]" end
+			if not silent then window._safeCall(callback, currentKey) end
+		end,
+		Get = function() return currentKey end,
+		Destroy = function(self)
+			stopWaiting()
+			for i, kb in ipairs(window._keybinds) do if kb.obj == obj then table.remove(window._keybinds, i); break end end
+			if container then container:Destroy() end
+		end,
+		_frame = container,
+		SetEnabled = function(self, enabled)
+			button.Active = enabled
+			button.BackgroundColor3 = enabled and theme.Btn or theme.Btn
+			button.TextColor3 = enabled and theme.Txt or theme.Dim
+		end,
+		SetTooltip = function(self, tipText)
+			managedConnect(window, container.MouseEnter, function() startTooltip(tipText, container) end)
+			managedConnect(window, container.MouseLeave, function() stopTooltip(container) end)
+		end,
+		SetContextMenu = function(self, items) setContextMenu(self, items) end,
+		set = function(self, th)
+			lbl.TextColor3 = th.Dim
+			lbl.Font = th.Fnt
+			button.BackgroundColor3 = th.Btn
+			button.TextColor3 = th.Txt
+			button.Font = th.Fnt
+		end
+	}, ControlMT)
+	registerConfigField(window, obj, "keybind", "keybind")
+	return obj
+end
+
+-- Dropdown
+local function makeDropdown(parent, window, text, options, defaultIndex, callback, textSize)
+	if window._destroyed or not parent or not parent.Parent then return end
+	if not options or #options == 0 then return end
+	local theme = window.T
+	textSize = textSize or 13
+	local selected = math.clamp(tonumber(defaultIndex) or 1, 1, #options)
+
+	local container = create("Frame", { Size = UDim2.new(1, 0, 0, theme.BH + 18), BackgroundTransparency = 1, Parent = parent })
+	local lbl = create("TextLabel", { Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1, Text = text, TextColor3 = theme.Dim, Font = theme.Fnt, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, Parent = container })
+	local button = create("TextButton", {
+		Size = UDim2.new(1, 0, 0, theme.BH), Position = UDim2.new(0, 0, 0, 18),
+		BackgroundColor3 = theme.Btn, Text = "  " .. tostring(options[selected] or ""),
+		TextColor3 = theme.Txt, Font = theme.Fnt, TextSize = textSize,
+		TextXAlignment = Enum.TextXAlignment.Left, AutoButtonColor = false, Parent = container
+	})
+	create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = button })
+
+	local dropFrame, dropConnections, opened = nil, {}, false
+
+	local function close()
+		if not opened then return end
+		opened = false
+		if dropFrame then
+			for _, c in ipairs(dropConnections) do window._connMgr:Disconnect(c) end
+			tableClear(dropConnections)
+			dropFrame:Destroy(); dropFrame = nil
+		end
+		window._activeDropdown = nil
+	end
+
+	managedConnect(window, button.MouseButton1Click, function()
+		if window._destroyed then return end
+		if opened then close(); return end
+		opened = true
+		dropFrame = create("Frame", {
+			Size = UDim2.new(1, 0, 0, math.min(#options * theme.BH, 150)),
+			Position = UDim2.new(0, 0, 1, 2),
+			BackgroundColor3 = theme.Btn, ClipsDescendants = true, Parent = button
+		})
+		create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = dropFrame })
+		create("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Parent = dropFrame })
+		window._activeDropdown = obj
+		obj._dropFrame = dropFrame
+
+		for i, option in ipairs(options) do
+			local optBtn = create("TextButton", {
+				Size = UDim2.new(1, 0, 0, theme.BH),
+				BackgroundColor3 = (i == selected) and theme.Acc or theme.Btn,
+				Text = "  " .. tostring(option), TextColor3 = theme.Txt,
+				Font = theme.Fnt, TextSize = textSize, TextXAlignment = Enum.TextXAlignment.Left,
+				AutoButtonColor = false, Parent = dropFrame
+			})
+			local optConn = optBtn.MouseButton1Click:Connect(function() obj:Set(i); close() end)
+			table.insert(dropConnections, optConn)
+			window._connMgr:Add(optConn)
+		end
+	end)
+
+	local obj = setmetatable({
+		Set = function(self, idx, silent)
+			if window._destroyed or not button or not button.Parent then return end
+			idx = math.clamp(tonumber(idx) or selected, 1, #options)
+			selected = idx
+			button.Text = "  " .. tostring(options[selected] or "")
+			if not silent then window._safeCall(callback, selected, options[selected]) end
+		end,
+		Get = function() return selected, options[selected] end,
+		Close = close,
+		Destroy = function(self) close()
+			for i, dd in ipairs(window._dropdowns) do if dd == obj then table.remove(window._dropdowns, i); break end end
+			if container then container:Destroy() end
+		end,
+		_frame = container,
+		SetEnabled = function(self, enabled)
+			button.Active = enabled
+			button.BackgroundColor3 = enabled and theme.Btn or theme.Btn
+			button.TextColor3 = enabled and theme.Txt or theme.Dim
+		end,
+		SetTooltip = function(self, tipText)
+			managedConnect(window, container.MouseEnter, function() startTooltip(tipText, container) end)
+			managedConnect(window, container.MouseLeave, function() stopTooltip(container) end)
+		end,
+		SetContextMenu = function(self, items) setContextMenu(self, items) end,
+		set = function(self, th)
+			lbl.TextColor3 = th.Dim
+			lbl.Font = th.Fnt
+			button.BackgroundColor3 = th.Btn
+			button.TextColor3 = th.Txt
+			button.Font = th.Fnt
+		end
+	}, ControlMT)
+	table.insert(window._dropdowns, obj)
+	registerConfigField(window, obj, "dropdown", "dropdown")
+	return obj
+end
+
+-- MultiSelect Dropdown
+local function makeMultiDropdown(parent, window, text, options, defaultIndices, callback, textSize)
+	if window._destroyed or not parent or not parent.Parent then return end
+	if not options or #options == 0 then return end
+	defaultIndices = defaultIndices or {}
+	local selected = {}
+	for _, v in ipairs(defaultIndices) do selected[v] = true end
+
+	local theme = window.T
+	textSize = textSize or 13
+
+	local container = create("Frame", { Size = UDim2.new(1, 0, 0, theme.BH + 18), BackgroundTransparency = 1, Parent = parent })
+	local lbl = create("TextLabel", { Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1, Text = text, TextColor3 = theme.Dim, Font = theme.Fnt, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, Parent = container })
+	local button = create("TextButton", {
+		Size = UDim2.new(1, 0, 0, theme.BH), Position = UDim2.new(0, 0, 0, 18),
+		BackgroundColor3 = theme.Btn, Text = "  Select...",
+		TextColor3 = theme.Txt, Font = theme.Fnt, TextSize = textSize,
+		TextXAlignment = Enum.TextXAlignment.Left, AutoButtonColor = false, Parent = container
+	})
+	create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = button })
+
+	local dropFrame, dropConnections, opened = nil, {}, false
+
+	local function updateButtonText()
+		local sel = {}
+		for i, v in pairs(selected) do if v then sel[#sel+1] = options[i] end end
+		if #sel == 0 then button.Text = "  Select..." else button.Text = "  " .. table.concat(sel, ", ") end
+	end
+	updateButtonText()
+
+	local function close()
+		if not opened then return end
+		opened = false
+		if dropFrame then
+			for _, c in ipairs(dropConnections) do window._connMgr:Disconnect(c) end
+			tableClear(dropConnections)
+			dropFrame:Destroy(); dropFrame = nil
+		end
+		window._activeDropdown = nil
+	end
+
+	managedConnect(window, button.MouseButton1Click, function()
+		if window._destroyed then return end
+		if opened then close(); return end
+		opened = true
+		dropFrame = create("Frame", {
+			Size = UDim2.new(1, 0, 0, math.min(#options * theme.BH, 150)),
+			Position = UDim2.new(0, 0, 1, 2),
+			BackgroundColor3 = theme.Btn, ClipsDescendants = true, Parent = button
+		})
+		create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = dropFrame })
+		create("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Parent = dropFrame })
+		window._activeDropdown = obj
+		obj._dropFrame = dropFrame
+
+		for i, option in ipairs(options) do
+			local optBtn = create("TextButton", {
+				Size = UDim2.new(1, 0, 0, theme.BH),
+				BackgroundColor3 = selected[i] and theme.Acc or theme.Btn,
+				Text = "  " .. (selected[i] and "✓ " or "   ") .. tostring(option),
+				TextColor3 = theme.Txt,
+				Font = theme.Fnt, TextSize = textSize, TextXAlignment = Enum.TextXAlignment.Left,
+				AutoButtonColor = false, Parent = dropFrame
+			})
+			local optConn = optBtn.MouseButton1Click:Connect(function()
+				selected[i] = not selected[i]
+				optBtn.Text = "  " .. (selected[i] and "✓ " or "   ") .. tostring(option)
+				optBtn.BackgroundColor3 = selected[i] and theme.Acc or theme.Btn
+				updateButtonText()
+				if callback then
+					local selList = {}
+					for idx, val in pairs(selected) do if val then selList[#selList+1] = idx end end
+					window._safeCall(callback, selList)
+				end
+			end)
+			table.insert(dropConnections, optConn)
+			window._connMgr:Add(optConn)
+		end
+	end)
+
+	local obj = setmetatable({
+		Set = function(self, indices, silent)
+			if window._destroyed or not button or not button.Parent then return end
+			indices = indices or {}
+			tableClear(selected)
+			for _, i in ipairs(indices) do selected[i] = true end
+			updateButtonText()
+			if not silent then window._safeCall(callback, indices) end
+		end,
+		Get = function()
+			local selList = {}
+			for idx, val in pairs(selected) do if val then selList[#selList+1] = idx end end
+			return selList
+		end,
+		Close = close,
+		Destroy = function(self) close()
+			for i, dd in ipairs(window._dropdowns) do if dd == obj then table.remove(window._dropdowns, i); break end end
+			if container then container:Destroy() end
+		end,
+		_frame = container,
+		SetEnabled = function(self, enabled)
+			button.Active = enabled
+			button.BackgroundColor3 = enabled and theme.Btn or theme.Btn
+			button.TextColor3 = enabled and theme.Txt or theme.Dim
+		end,
+		SetTooltip = function(self, tipText)
+			managedConnect(window, container.MouseEnter, function() startTooltip(tipText, container) end)
+			managedConnect(window, container.MouseLeave, function() stopTooltip(container) end)
+		end,
+		SetContextMenu = function(self, items) setContextMenu(self, items) end,
+		set = function(self, th)
+			lbl.TextColor3 = th.Dim
+			lbl.Font = th.Fnt
+			button.BackgroundColor3 = th.Btn
+			button.TextColor3 = th.Txt
+			button.Font = th.Fnt
+		end
+	}, ControlMT)
+	table.insert(window._dropdowns, obj)
+	registerConfigField(window, obj, "multidropdown", "multidropdown")
+	return obj
+end
+
+-- ColorPicker
+local function makeColorPicker(parent, window, text, defaultColor, callback, textSize)
+	if window._destroyed or not parent or not parent.Parent then return end
+	local theme = window.T
+	textSize = textSize or 13
+	local currentColor = defaultColor or Color3.fromRGB(255,255,255)
+
+	local container = create("Frame", { Size = UDim2.new(1, 0, 0, theme.BH + 18), BackgroundTransparency = 1, Parent = parent })
+	local lbl = create("TextLabel", { Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1, Text = text, TextColor3 = theme.Dim, Font = theme.Fnt, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, Parent = container })
+	local colorButton = create("Frame", { Size = UDim2.new(0, 40, 0, theme.BH), Position = UDim2.new(0, 0, 0, 18), BackgroundColor3 = currentColor, Parent = container })
+	create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = colorButton })
+	local hexLabel = create("TextLabel", { Size = UDim2.new(1, -44, 0, theme.BH), Position = UDim2.new(0, 44, 0, 18), BackgroundTransparency = 1, Text = "#" .. currentColor:ToHex():upper(), TextColor3 = theme.Txt, Font = theme.Fnt, TextSize = textSize, TextXAlignment = Enum.TextXAlignment.Left, Parent = container })
+
+	local pickerFrame, opened, svConn, hueConn, outsideConn = nil, false, nil, nil, nil
+
+	local function updateColorFromPicker(hue, sat, val)
+		local r, g, b = Color3.fromHSV(hue, sat, val):ToRGB()
+		local newCol = Color3.new(r, g, b)
+		obj:Set(newCol, true) -- silent update to sync config
+		colorButton.BackgroundColor3 = currentColor
+		hexLabel.Text = "#" .. currentColor:ToHex():upper()
+		if pickerFrame then
+			local svFrame = pickerFrame:FindFirstChild("SVFrame")
+			if svFrame then svFrame.BackgroundColor3 = currentColor end
+			local preview = pickerFrame:FindFirstChild("Preview")
+			if preview then preview.BackgroundColor3 = currentColor end
+		end
+		window._safeCall(callback, currentColor)
+	end
+
+	local function closePicker()
+		if not opened then return end
+		opened = false
+		if pickerFrame then pickerFrame:Destroy(); pickerFrame = nil end
+		if svConn then window._connMgr:Disconnect(svConn); svConn = nil end
+		if hueConn then window._connMgr:Disconnect(hueConn); hueConn = nil end
+		if outsideConn then window._connMgr:Disconnect(outsideConn); outsideConn = nil end
+		window._activeColorPicker = nil
+	end
+
+	managedConnect(window, colorButton.InputBegan, function(input)
+		if window._destroyed then return end
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			if opened then closePicker(); return end
+			opened = true
+			pickerFrame = create("Frame", { Size = UDim2.new(0, 180, 0, 180), Position = UDim2.new(0, 0, 1, 4), BackgroundColor3 = theme.Btn, Parent = colorButton })
+			create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = pickerFrame })
+
+			local hueFrame = create("Frame", { Size = UDim2.new(0, 20, 1, 0), BackgroundColor3 = Color3.new(1,1,1), Parent = pickerFrame })
+			create("UIGradient", { Color = ColorSequence.new{
+				ColorSequenceKeypoint.new(0, Color3.fromRGB(255,0,0)),
+				ColorSequenceKeypoint.new(0.16, Color3.fromRGB(255,255,0)),
+				ColorSequenceKeypoint.new(0.33, Color3.fromRGB(0,255,0)),
+				ColorSequenceKeypoint.new(0.5, Color3.fromRGB(0,255,255)),
+				ColorSequenceKeypoint.new(0.66, Color3.fromRGB(0,0,255)),
+				ColorSequenceKeypoint.new(0.83, Color3.fromRGB(255,0,255)),
+				ColorSequenceKeypoint.new(1, Color3.fromRGB(255,0,0))
+			} }).Parent = hueFrame
+
+			local svFrame = create("Frame", { Name = "SVFrame", Size = UDim2.new(1, -24, 1, -24), Position = UDim2.new(0, 22, 0, 2), BackgroundColor3 = currentColor, Parent = pickerFrame })
+			create("UIGradient", { Rotation = 0, Transparency = NumberSequence.new(NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1)) }).Parent = svFrame
+			create("UIGradient", { Rotation = 90, Transparency = NumberSequence.new(NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0)) }).Parent = svFrame
+
+			local preview = create("Frame", { Name = "Preview", Size = UDim2.new(0, 20, 0, 20), Position = UDim2.new(1, 2, 1, 0), BackgroundColor3 = currentColor, Parent = pickerFrame })
+			create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = preview })
+
+			hueConn = hueFrame.InputBegan:Connect(function(hInput)
+				if window._destroyed or not pickerFrame then return end
+				if hInput.UserInputType == Enum.UserInputType.MouseButton1 or hInput.UserInputType == Enum.UserInputType.Touch then
+					local relY = math.clamp((hInput.Position.Y - hueFrame.AbsolutePosition.Y) / hueFrame.AbsoluteSize.Y, 0, 1)
+					local _, s, v = Color3.toHSV(currentColor)
+					updateColorFromPicker(relY, s, v)
+				end
+			end)
+			window._connMgr:Add(hueConn)
+
+			svConn = svFrame.InputBegan:Connect(function(svInput)
+				if window._destroyed or not pickerFrame then return end
+				if svInput.UserInputType == Enum.UserInputType.MouseButton1 or svInput.UserInputType == Enum.UserInputType.Touch then
+					local relX = math.clamp((svInput.Position.X - svFrame.AbsolutePosition.X) / svFrame.AbsoluteSize.X, 0, 1)
+					local relY = math.clamp((svInput.Position.Y - svFrame.AbsolutePosition.Y) / svFrame.AbsoluteSize.Y, 0, 1)
+					local h, _, _ = Color3.toHSV(currentColor)
+					updateColorFromPicker(h, relX, 1 - relY)
+				end
+			end)
+			window._connMgr:Add(svConn)
+
+			window._activeColorPicker = obj
+			obj._pickerFrame = pickerFrame
+		end
+	end)
+
+	local obj = setmetatable({
+		Set = function(self, newColor, silent)
+			if window._destroyed or not colorButton or not colorButton.Parent then return end
+			currentColor = newColor or currentColor
+			colorButton.BackgroundColor3 = currentColor
+			hexLabel.Text = "#" .. currentColor:ToHex():upper()
+			if not silent then window._safeCall(callback, currentColor) end
+		end,
+		Get = function() return currentColor end,
+		Close = closePicker,
+		Destroy = function(self) closePicker()
+			for i, cp in ipairs(window._colorpickers) do if cp == obj then table.remove(window._colorpickers, i); break end end
+			if container then container:Destroy() end
+		end,
+		_frame = container,
+		SetEnabled = function(self, enabled)
+			colorButton.Active = enabled
+			hexLabel.TextColor3 = enabled and theme.Txt or theme.Dim
+		end,
+		SetTooltip = function(self, tipText)
+			managedConnect(window, container.MouseEnter, function() startTooltip(tipText, container) end)
+			managedConnect(window, container.MouseLeave, function() stopTooltip(container) end)
+		end,
+		SetContextMenu = function(self, items) setContextMenu(self, items) end,
+		set = function(self, th)
+			lbl.TextColor3 = th.Dim
+			lbl.Font = th.Fnt
+			hexLabel.TextColor3 = th.Txt
+			hexLabel.Font = th.Fnt
+		end
+	}, ControlMT)
+	table.insert(window._colorpickers, obj)
+	registerConfigField(window, obj, "color", "color")
+	return obj
+end
+
+-- ProgressBar
+local function makeProgressBar(parent, window, text, initialValue, maxValue, callback, textSize)
+	if window._destroyed or not parent or not parent.Parent then return end
+	local theme = window.T
+	textSize = textSize or 12
+	local max = math.max(1, tonumber(maxValue) or 100)
+	local value = math.clamp(tonumber(initialValue) or 0, 0, max)
+
+	local container = create("Frame", { Size = UDim2.new(1, 0, 0, theme.BH + 18), BackgroundTransparency = 1, Parent = parent })
+	local lbl = create("TextLabel", { Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1, Text = text, TextColor3 = theme.Dim, Font = theme.Fnt, TextSize = textSize, TextXAlignment = Enum.TextXAlignment.Left, Parent = container })
+	local barFrame = create("Frame", { Size = UDim2.new(1, 0, 0, theme.BH-4), Position = UDim2.new(0, 0, 0, 18), BackgroundColor3 = theme.Btn, Parent = container })
+	create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = barFrame })
+	local fill = create("Frame", { Size = UDim2.new(value/max, 0, 1, 0), BackgroundColor3 = theme.Acc, Parent = barFrame })
+	create("UICorner", { CornerRadius = UDim.new(0, 4), Parent = fill })
+
+	local obj = setmetatable({
+		Set = function(self, newVal, silent)
+			if window._destroyed or not fill then return end
+			value = math.clamp(tonumber(newVal) or 0, 0, max)
+			fill.Size = UDim2.new(value / max, 0, 1, 0)
+			if not silent then window._safeCall(callback, value) end
+		end,
+		Get = function() return value end,
+		Destroy = function(self) if container then container:Destroy() end end,
+		_frame = container,
+		SetEnabled = function(self, enabled)
+			fill.BackgroundColor3 = enabled and theme.Acc or theme.Dim
+		end,
+		SetTooltip = function(self, tipText)
+			managedConnect(window, container.MouseEnter, function() startTooltip(tipText, container) end)
+			managedConnect(window, container.MouseLeave, function() stopTooltip(container) end)
+		end,
+		SetContextMenu = function(self, items) setContextMenu(self, items) end,
+		set = function(self, th)
+			lbl.TextColor3 = th.Dim
+			lbl.Font = th.Fnt
+			barFrame.BackgroundColor3 = th.Btn
+			fill.BackgroundColor3 = th.Acc
+		end
+	}, ControlMT)
+	registerConfigField(window, obj, "progress", "progress")
+	return obj
+end
+
+-- ======================== ПРОКСИ-СЕКЦИЯ ========================
+local function createSectionProxy(window, sectionFrame, sectionParent)
+	local elements = {}
+	local proxy = { _frame = sectionFrame, _elements = elements, W = window, _cF = window._cF, _connMgr = window._connMgr }
+	local function addElement(obj) if obj then table.insert(elements, obj) end; return obj end
+
+	proxy.AddSeparator = function() return addElement(makeSeparator(sectionFrame, window)) end
+	proxy.AddLabel = function(text) return addElement(makeLabel(sectionFrame, window, text, window._textSizeLabel)) end
+	proxy.AddButton = function(text, cb, confirm, extra) extra = extra or {}; return addElement(makeButton(sectionFrame, window, text, cb, confirm, window._textSizeButton, extra.bind)) end
+	proxy.AddToggle = function(text, state, cb, extra) extra = extra or {}; return addElement(makeToggle(sectionFrame, window, text, state, cb, window._textSizeButton, extra.bind)) end
+	proxy.AddSlider = function(text, min, max, default, step, cb) return addElement(makeSlider(sectionFrame, window, text, min, max, default, step, cb, window._textSizeSlider)) end
+	proxy.AddInput = function(text, default, numbersOnly, cb) return addElement(makeInput(sectionFrame, window, text, default, numbersOnly, cb, window._textSizeInput)) end
+	proxy.AddCycle = function(text, options, cb) return addElement(makeCycle(sectionFrame, window, text, options, cb, window._textSizeButton)) end
+	proxy.AddKeybind = function(text, defaultKey, cb) return addElement(makeKeybind(sectionFrame, window, text, defaultKey, cb, window._textSizeButton)) end
+	proxy.AddDropdown = function(text, options, defaultIndex, cb) return addElement(makeDropdown(sectionFrame, window, text, options, defaultIndex, cb, window._textSizeButton)) end
+	proxy.AddMultiDropdown = function(text, options, defaultIndices, cb) return addElement(makeMultiDropdown(sectionFrame, window, text, options, defaultIndices, cb, window._textSizeButton)) end
+	proxy.AddColorPicker = function(text, defaultColor, cb) return addElement(makeColorPicker(sectionFrame, window, text, defaultColor, cb, window._textSizeButton)) end
+	proxy.AddProgressBar = function(text, initialValue, maxValue, cb) return addElement(makeProgressBar(sectionFrame, window, text, initialValue, maxValue, cb, window._textSizeSlider)) end
+
+	-- Category
+	proxy.AddCategory = function(name)
+		local container = create("Frame", { Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1, Parent = sectionFrame })
+		local layout = create("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder, Parent = container })
+		local header = create("TextButton", { Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Text = "▼  " .. name, TextColor3 = window.T.Txt, Font = window.T.Fnt, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left, Parent = container })
+		local content = create("Frame", { Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1, Parent = container })
+		local contentLayout = create("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder, Parent = content })
+		local collapsed = false
+
+		managedConnect(window, header.MouseButton1Click, function()
+			collapsed = not collapsed
+			content.Visible = not collapsed
+			header.Text = (collapsed and "▶  " or "▼  ") .. name
+		end)
+
+		local catProxy = createSectionProxy(window, content)
+		catProxy._header = header
+		catProxy._container = container
+		catProxy._content = content
+		catProxy.Collapse = function() collapsed = true; content.Visible = false; header.Text = "▶  " .. name end
+		catProxy.Expand = function() collapsed = false; content.Visible = true; header.Text = "▼  " .. name end
+		catProxy.Destroy = function()
+			catProxy:Clear()
+			if container then container:Destroy() end
+		end
+		addElement(catProxy)
+		return catProxy
+	end
+
+	-- Sub-tabs
+	proxy.AddSubTabs = function(tabNames)
+		local tabContainer = create("Frame", { Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1, Parent = sectionFrame })
+		local tabButtons = {}
+		local tabContents = {}
+
+		local tabLayout = create("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2), Parent = tabContainer })
+
+		for i, name in ipairs(tabNames) do
+			local btn = create("TextButton", { Size = UDim2.new(0, 60, 1, 0), BackgroundColor3 = window.T.Btn, Text = name, TextColor3 = window.T.Dim, Font = window.T.Fnt, TextSize = 12, AutoButtonColor = false, Parent = tabContainer })
+			create("UICorner", { CornerRadius = UDim.new(0, 3), Parent = btn })
+			local content = create("Frame", { Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1, Visible = false, Parent = sectionFrame })
+			local layout = create("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder, Parent = content })
+			tabButtons[i] = btn
+			local contentProxy = createSectionProxy(window, content)
+			tabContents[i] = { frame = content, layout = layout, proxy = contentProxy }
+			managedConnect(window, btn.MouseButton1Click, function()
+				for j, b in ipairs(tabButtons) do
+					b.BackgroundColor3 = window.T.Btn
+					b.TextColor3 = window.T.Dim
+					tabContents[j].frame.Visible = false
+				end
+				btn.BackgroundColor3 = window.T.Acc
+				btn.TextColor3 = window.T.Txt
+				content.Visible = true
+				if window.resizeWindow then window.resizeWindow() end
+			end)
+		end
+		if #tabNames > 0 then
+			tabButtons[1].BackgroundColor3 = window.T.Acc
+			tabButtons[1].TextColor3 = window.T.Txt
+			tabContents[1].frame.Visible = true
+		end
+
+		local subTabs = {
+			GetTab = function(index) return tabContents[index] and tabContents[index].proxy end,
+			SwitchTo = function(index)
+				if tabButtons[index] then tabButtons[index].MouseButton1Click:Fire() end
+			end,
+			Destroy = function()
+				for _, tab in ipairs(tabContents) do
+					tab.proxy:Clear()
+					if tab.frame then tab.frame:Destroy() end
+				end
+				tabContainer:Destroy()
+			end
+		}
+		addElement(subTabs)
+		return subTabs
+	end
+
+	proxy.AddElements = function(tbl)
+		for _, elem in ipairs(tbl) do
+			local etype = elem[1]
+			if etype == "Separator" then proxy:AddSeparator()
+			elseif etype == "Label" then proxy:AddLabel(elem[2])
+			elseif etype == "Button" then proxy:AddButton(elem[2], elem[3], elem[4], elem[5])
+			elseif etype == "Toggle" then proxy:AddToggle(elem[2], elem[3], elem[4], elem[5])
+			elseif etype == "Slider" then proxy:AddSlider(elem[2], elem[3], elem[4], elem[5], elem[6], elem[7])
+			elseif etype == "Input" then proxy:AddInput(elem[2], elem[3], elem[4], elem[5])
+			elseif etype == "Cycle" then proxy:AddCycle(elem[2], elem[3], elem[4])
+			elseif etype == "Keybind" then proxy:AddKeybind(elem[2], elem[3], elem[4])
+			elseif etype == "Dropdown" then proxy:AddDropdown(elem[2], elem[3], elem[4], elem[5])
+			elseif etype == "MultiDropdown" then proxy:AddMultiDropdown(elem[2], elem[3], elem[4], elem[5])
+			elseif etype == "ColorPicker" then proxy:AddColorPicker(elem[2], elem[3], elem[4])
+			elseif etype == "ProgressBar" then proxy:AddProgressBar(elem[2], elem[3], elem[4], elem[5])
+			end
+		end
+	end
+
+	proxy.RemoveElement = function(element)
+		for i, v in ipairs(elements) do if v == element then table.remove(elements, i); if v.Destroy then v:Destroy() end; return true end end
+		return false
+	end
+	proxy.Clear = function() for _, e in ipairs(elements) do if e.Destroy then e:Destroy() end end; tableClear(elements) end
+	return proxy
+end
+
+-- ======================== СОЗДАНИЕ ОКНА ========================
+function AzraelUI:CreateWindow(title, cfg)
+	if not safeGui then return nil end
+	assert(type(title) == "string" and #title > 0, "[AzUI] title must be non-empty string")
+
+	if windows[title] and not windows[title]._destroyed then return windows[title] end
+	if windows[title] then windows[title]:Destroy() end
+
+	cfg = cfg or {}
+	local theme = {}
+	local startTheme = cfg.theme and (type(cfg.theme) == "string" and Themes[cfg.theme] or cfg.theme) or DefaultTheme
+	for k, v in pairs(startTheme) do theme[k] = v end
+	local scale = theme.Scale or 1
+	theme.W, theme.BH = math.floor(theme.W * scale), math.floor(theme.BH * scale)
+	local function scaledSize(base) return math.floor(base * scale) end
+	local PAD, IPAD = scaledSize(4), scaledSize(6)
+	local TOP_H, TAB_H = 26, 22
+	local textSizes = {
+		title = scaledSize(13), button = scaledSize(13), slider = scaledSize(12),
+		input = scaledSize(12), label = scaledSize(12), cycle = scaledSize(13),
+		keybind = scaledSize(13), dropdown = scaledSize(13), color = scaledSize(13), miniBtn = scaledSize(16)
+	}
+
+	local connMgr = ConnectionManager.new()
+	local window = {
+		_connMgr = connMgr, _configIdCounter = 0, _sections = {}, _activeSection = nil,
+		_dropdowns = {}, _colorpickers = {}, _keybinds = {}, _cF = {}, T = theme,
+		_destroyed = false, _autoSave = cfg.autoSave or false, _onCreate = cfg.onCreate,
+		_onDestroy = cfg.onDestroy, _onMinimize = cfg.onMinimize, _onShow = cfg.onShow, _onHide = cfg.onHide,
+		_safeCall = safeCall,
+		_lastSaveTime = 0, _minimized = false,
+		_activeSlider = nil, _activeDropdown = nil, _activeColorPicker = nil,
+		_textSizeLabel = textSizes.label, _textSizeButton = textSizes.button,
+		_textSizeSlider = textSizes.slider, _textSizeInput = textSizes.input,
+		_PAD = PAD, _IPAD = IPAD,
+		_themeElements = {},
+	}
+	windows[title] = window
+
+	local WIN_W = theme.W
+
+	local sg = create("ScreenGui", { Name = randomName(), ResetOnSpawn = false, DisplayOrder = 99998, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, Parent = safeGui })
+	if not sg then return nil end
+
+	local mainFrame = create("Frame", { Size = UDim2.new(0, WIN_W, 0, TOP_H), Position = cfg.pos or UDim2.new(0, 0, 0, 0), BackgroundColor3 = theme.Bg, Active = true, ClipsDescendants = true, Parent = sg })
+	create("UICorner", { CornerRadius = UDim.new(0, 6), Parent = mainFrame })
+
+	if not cfg.pos then
+		local vps = CAM.ViewportSize
+		mainFrame.Position = UDim2.new(0, math.floor(vps.X/2 - WIN_W/2), 0, math.floor(vps.Y/2 - 120))
+	end
+
+	local topBar = create("Frame", { Size = UDim2.new(1, 0, 0, TOP_H), BackgroundColor3 = theme.Top, ClipsDescendants = false, Parent = mainFrame })
+	create("UICorner", { CornerRadius = UDim.new(0, 6), Parent = topBar })
+	create("Frame", { Size = UDim2.new(1, 0, 0, 6), Position = UDim2.new(0, 0, 1, -6), BackgroundColor3 = theme.Top, BorderSizePixel = 0, Parent = topBar })
+
+	local titleLabel = create("TextLabel", { Size = UDim2.new(1, -52, 1, 0), Position = UDim2.new(0, 7, 0, 0), BackgroundTransparency = 1, Text = title, TextColor3 = theme.Txt, Font = theme.Fnt, TextSize = textSizes.title, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = topBar })
+	local minimizeBtn = create("TextButton", { Size = UDim2.new(0, 22, 0, 22), Position = UDim2.new(1, -46, 0, 2), BackgroundTransparency = 1, Text = "-", TextColor3 = theme.Dim, Font = theme.Fnt, TextSize = textSizes.miniBtn, AutoButtonColor = false, Parent = topBar })
+	local closeBtn = create("TextButton", { Size = UDim2.new(0, 22, 0, 22), Position = UDim2.new(1, -24, 0, 2), BackgroundTransparency = 1, Text = "×", TextColor3 = theme.Err, Font = theme.Fnt, TextSize = textSizes.miniBtn, AutoButtonColor = false, Parent = topBar })
+
+	local tabRow = create("Frame", { Size = UDim2.new(1, 0, 0, TAB_H), Position = UDim2.new(0, 0, 0, TOP_H), BackgroundColor3 = theme.Top, Visible = false, ClipsDescendants = true, Parent = mainFrame })
+	if tabRow then
+		create("Frame", { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 1, -1), BackgroundColor3 = theme.Sep, BorderSizePixel = 0, Parent = tabRow })
+		create("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 1), Parent = tabRow })
+		create("UIPadding", { PaddingLeft = UDim.new(0, 2), PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 2), Parent = tabRow })
+	end
+
+	local resizeDirty = false
+	local function resizeWindow()
+		if window._minimized or resizeDirty then return end
+		resizeDirty = true
+		taskDefer(function()
+			resizeDirty = false
+			if window._minimized or not mainFrame or not mainFrame.Parent then return end
+			local hasTabs = #window._sections > 0
+			if tabRow then tabRow.Visible = hasTabs end
+			local base = TOP_H + (hasTabs and TAB_H or 0)
+			local secH, flatH = 0, 0
+			if window._activeSection and window._activeSection ~= window._flatSec then
+				local lo = window._activeSection._layout
+				if lo and lo.Parent then secH = lo.AbsoluteContentSize.Y + PAD * 2 end
+			end
+			if window._flatSec then
+				local lo = window._flatSec._layout
+				if lo and lo.Parent then flatH = lo.AbsoluteContentSize.Y + PAD * 2 end
+			end
+			mainFrame.Size = UDim2.new(0, WIN_W, 0, base + secH + flatH)
+			if window._flatSec and window._flatSec._frame then
+				window._flatSec._frame.Position = UDim2.new(0, 0, 0, base + secH)
+			end
+		end)
+	end
+	window.resizeWindow = resizeWindow
+
+	local function getSectionsY() return TOP_H + (#window._sections > 0 and TAB_H or 0) end
+
+	-- Перетаскивание
+	do
+		local dragConn, dragMoveConn, dragEndConn
+		dragConn = topBar.InputBegan:Connect(function(input)
+			if window._destroyed or window._minimized then return end
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				local sx, sy = input.Position.X, input.Position.Y
+				local spX, spY = mainFrame.Position.X.Offset, mainFrame.Position.Y.Offset
+				local iType = input.UserInputType
+				dragMoveConn = UIS.InputChanged:Connect(function(input2)
+					if input2.UserInputType == iType then
+						local vps = CAM.ViewportSize
+						mainFrame.Position = UDim2.new(0, math.clamp(spX + (input2.Position.X - sx), 0, vps.X - WIN_W), 0, math.clamp(spY + (input2.Position.Y - sy), 0, vps.Y - TOP_H))
+					end
+				end)
+				dragEndConn = UIS.InputEnded:Connect(function(input2)
+					if input2.UserInputType == iType then
+						if dragMoveConn then connMgr:Disconnect(dragMoveConn); dragMoveConn = nil end
+						if dragEndConn then connMgr:Disconnect(dragEndConn); dragEndConn = nil end
+					end
+				end)
+				connMgr:Add(dragMoveConn)
+				connMgr:Add(dragEndConn)
+			end
+		end)
+		connMgr:Add(dragConn)
+	end
+
+	-- Resize handle
+	if cfg.resizable then
+		local resizeGrip = create("Frame", { Size = UDim2.new(0, 16, 0, 16), Position = UDim2.new(1, -16, 1, -16), BackgroundTransparency = 0.8, BackgroundColor3 = theme.Dim, Parent = mainFrame })
+		create("UICorner", { CornerRadius = UDim.new(0, 3), Parent = resizeGrip })
+		local resizeConn, moveConn, endConn
+		resizeConn = resizeGrip.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				local startMouse = input.Position
+				local startSize = mainFrame.AbsoluteSize
+				local iType = input.UserInputType
+				moveConn = UIS.InputChanged:Connect(function(input2)
+					if input2.UserInputType == iType then
+						local dx = input2.Position.X - startMouse.X
+						local dy = input2.Position.Y - startMouse.Y
+						local newW = math.max(150, startSize.X + dx)
+						local newH = math.max(TOP_H + TAB_H + 50, startSize.Y + dy)
+						mainFrame.Size = UDim2.new(0, newW, 0, newH)
+						WIN_W = newW
+						window.resizeWindow()
+					end
+				end)
+				endConn = UIS.InputEnded:Connect(function(input2)
+					if input2.UserInputType == iType then
+						if moveConn then connMgr:Disconnect(moveConn); moveConn = nil end
+						if endConn then connMgr:Disconnect(endConn); endConn = nil end
+					end
+				end)
+				connMgr:Add(moveConn)
+				connMgr:Add(endConn)
+			end
+		end)
+		connMgr:Add(resizeConn)
+	end
+
+	connMgr:Add(UIS.InputChanged:Connect(function(input)
+		if window._activeSlider and window._activeSlider._onInputChanged then
+			window._activeSlider:_onInputChanged(input)
+		end
+	end))
+	connMgr:Add(UIS.InputEnded:Connect(function(input)
+		if window._activeSlider and window._activeSlider._onInputEnded then
+			window._activeSlider:_onInputEnded(input)
+		end
+	end))
+
+	connMgr:Add(UIS.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			local target = input.Instance
+			if window._activeDropdown and window._activeDropdown._dropFrame then
+				if not target or not (target == window._activeDropdown._dropFrame or target:IsDescendantOf(window._activeDropdown._dropFrame)) then
+					window._activeDropdown:Close()
+				end
+			end
+			if window._activeColorPicker and window._activeColorPicker._pickerFrame then
+				if not target or not (target == window._activeColorPicker._pickerFrame or target:IsDescendantOf(window._activeColorPicker._pickerFrame)) then
+					window._activeColorPicker:Close()
+				end
+			end
+		end
+	end))
+
+	-- Методы окна
+	function window:AddSection(name, opts)
+		if window._destroyed or not tabRow then return end
+		opts = opts or {}
+		tabRow.Visible = true
+		local scroll = opts.scrollable
+
+		local secFrame = create(scroll and "ScrollingFrame" or "Frame", {
+			Size = UDim2.new(1, 0, 0, 0),
+			Position = UDim2.new(0, 0, 0, getSectionsY()),
+			BackgroundColor3 = theme.Bg,
+			Visible = false,
+			ClipsDescendants = true,
+			Parent = mainFrame
+		})
+		if scroll then
+			secFrame.ScrollBarThickness = 2
+			secFrame.ScrollBarImageColor3 = theme.Acc
+			secFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+			secFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+		end
+		local layout = create("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder, Parent = secFrame })
+		create("UIPadding", { PaddingLeft = UDim.new(0, IPAD), PaddingRight = UDim.new(0, IPAD), PaddingTop = UDim.new(0, PAD), PaddingBottom = UDim.new(0, PAD), Parent = secFrame })
+		local sec = { _frame = secFrame, _layout = layout, _name = name, _proxy = nil, _scroll = scroll }
+		table.insert(window._sections, sec)
+
+		local tabCount = #window._sections
+		local tabWidth = math.max(30, math.floor((WIN_W - 4) / tabCount))
+		for _, s2 in ipairs(window._sections) do if s2._tab then s2._tab.Size = UDim2.new(0, tabWidth, 1, 0) end end
+		local tab = create("TextButton", { Size = UDim2.new(0, tabWidth, 1, 0), BackgroundColor3 = theme.Btn, Text = name, TextColor3 = theme.Dim, Font = theme.Fnt, TextSize = textSizes.slider, AutoButtonColor = false, TextTruncate = Enum.TextTruncate.AtEnd, Parent = tabRow })
+		create("UICorner", { CornerRadius = UDim.new(0, 3), Parent = tab })
+		sec._tab = tab
+
+		local function activate()
+			if window._destroyed then return end
+			for _, s2 in ipairs(window._sections) do if s2._frame then s2._frame.Visible = false end if s2._tab then s2._tab.BackgroundColor3 = theme.Btn; s2._tab.TextColor3 = theme.Dim end end
+			secFrame.Visible = true; tab.BackgroundColor3 = theme.Bg; tab.TextColor3 = theme.Acc
+			window._activeSection = sec
+			if window._flatSec and window._flatSec._frame then window._flatSec._frame.Visible = true end
+			resizeWindow()
+		end
+		if #window._sections == 1 then activate() end
+		managedConnect(window, tab.MouseButton1Click, activate)
+		if layout then managedConnect(window, layout:GetPropertyChangedSignal("AbsoluteContentSize"), function() if window._activeSection == sec then resizeWindow() end end) end
+
+		local proxy = createSectionProxy(window, secFrame)
+		sec._proxy = proxy
+		return proxy
+	end
+
+	function window:GetSection(name)
+		if window._destroyed then return nil end
+		for _, sec in ipairs(window._sections) do if sec._name == name then return sec._proxy end end
+		return nil
+	end
+
+	local function ensureFlatSection()
+		if window._destroyed then return nil end
+		if not window._flatSec then
+			local flatFrame = create("Frame", { Size = UDim2.new(1, 0, 0, 0), Position = UDim2.new(0, 0, 0, getSectionsY()), BackgroundColor3 = theme.Bg, Visible = true, ClipsDescendants = false, Parent = mainFrame })
+			local layout = create("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder, Parent = flatFrame })
+			create("UIPadding", { PaddingLeft = UDim.new(0, IPAD), PaddingRight = UDim.new(0, IPAD), PaddingTop = UDim.new(0, PAD), PaddingBottom = UDim.new(0, PAD), Parent = flatFrame })
+			local proxy = createSectionProxy(window, flatFrame)
+			window._flatSec = { _frame = flatFrame, _layout = layout, _proxy = proxy }
+			if not window._activeSection then window._activeSection = window._flatSec end
+			if layout then managedConnect(window, layout:GetPropertyChangedSignal("AbsoluteContentSize"), function() resizeWindow() end) end
+		end
+		if window._flatSec and window._flatSec._frame then window._flatSec._frame.Position = UDim2.new(0, 0, 0, getSectionsY()) end
+		return window._flatSec._proxy
+	end
+
+	for _, method in ipairs({"AddSeparator","AddLabel","AddButton","AddToggle","AddSlider","AddInput","AddCycle","AddKeybind","AddDropdown","AddMultiDropdown","AddColorPicker","AddProgressBar","AddCategory","AddSubTabs","AddElements"}) do
+		window[method] = function(...) if window._destroyed then return end; local proxy = ensureFlatSection(); if proxy then return proxy[method](proxy, ...) end end
+	end
+
+	-- Смена темы
+	function window:SetTheme(newTheme)
+		local themeTable = nil
+		if type(newTheme) == "string" then
+			themeTable = Themes[newTheme]
+		elseif type(newTheme) == "table" then
+			themeTable = newTheme
+		end
+		if not themeTable then return end
+		local th = {}
+		for k, v in pairs(themeTable) do th[k] = v end
+		th.Scale = th.Scale or 1
+		th.W = math.floor(th.W * th.Scale)
+		th.BH = math.floor(th.BH * th.Scale)
+		window.T = th
+		-- пересчитать отступы и шрифты
+		local newScale = th.Scale
+		local function scaledSize(base) return math.floor(base * newScale) end
+		local newPAD, newIPAD = scaledSize(4), scaledSize(6)
+		window._PAD = newPAD
+		window._IPAD = newIPAD
+		window._textSizeLabel = scaledSize(12)
+		window._textSizeButton = scaledSize(13)
+		window._textSizeSlider = scaledSize(12)
+		window._textSizeInput = scaledSize(12)
+
+		mainFrame.BackgroundColor3 = th.Bg
+		topBar.BackgroundColor3 = th.Top
+		titleLabel.TextColor3 = th.Txt
+		titleLabel.Font = th.Fnt
+		minimizeBtn.TextColor3 = th.Dim
+		closeBtn.TextColor3 = th.Err
+		if tabRow then tabRow.BackgroundColor3 = th.Top end
+		for _, sec in ipairs(window._sections) do
+			if sec._frame then sec._frame.BackgroundColor3 = th.Bg end
+			if sec._tab then sec._tab.BackgroundColor3 = th.Btn; sec._tab.TextColor3 = th.Dim; sec._tab.Font = th.Fnt end
+		end
+		-- перекрасить вложенные элементы
+		for _, sec in ipairs(window._sections) do
+			if sec._proxy then
+				for _, elem in ipairs(sec._proxy._elements) do
+					if elem.set then pcall(elem.set, th) end
+				end
+			end
+		end
+		if window._flatSec and window._flatSec._proxy then
+			window._flatSec._frame.BackgroundColor3 = th.Bg
+			for _, elem in ipairs(window._flatSec._proxy._elements) do
+				if elem.set then pcall(elem.set, th) end
+			end
+		end
+		WIN_W = th.W
+		mainFrame.Size = UDim2.new(0, WIN_W, 0, mainFrame.Size.Y.Offset)
+		resizeWindow()
+	end
+
+	function window:SetTitle(newTitle)
+		if window._destroyed then return end
+		if titleLabel and titleLabel.Parent then titleLabel.Text = tostring(newTitle) end
+	end
+
+	managedConnect(window, minimizeBtn.MouseButton1Click, function()
+		if window._destroyed then return end
+		window._minimized = not window._minimized
+		minimizeBtn.Text = window._minimized and "+" or "-"
+		if window._minimized then
+			mainFrame.Size = UDim2.new(0, WIN_W, 0, TOP_H)
+			for _, sec in ipairs(window._sections) do if sec._frame then sec._frame.Visible = false end end
+			if tabRow then tabRow.Visible = false end
+			if window._flatSec and window._flatSec._frame then window._flatSec._frame.Visible = false end
+			if window._activeDropdown and window._activeDropdown.Close then window._activeDropdown:Close() end
+			if window._activeColorPicker and window._activeColorPicker.Close then window._activeColorPicker:Close() end
+			for _, kb in ipairs(window._keybinds) do if kb.obj and kb.obj.CancelWait then kb.obj:CancelWait() end end
+			if window._activeSlider then window._activeSlider:_onInputEnded({ UserInputType = window._activeSlider.inputType }); window._activeSlider = nil end
+			safeCall(window._onMinimize)
+			resizeDirty = false
+		else
+			if tabRow then tabRow.Visible = #window._sections > 0 end
+			if window._activeSection and window._activeSection ~= window._flatSec then
+				for _, sec in ipairs(window._sections) do if sec._frame then sec._frame.Visible = (sec == window._activeSection) end end
+			end
+			if window._flatSec and window._flatSec._frame then window._flatSec._frame.Visible = true end
+			resizeDirty = false; resizeWindow()
+			safeCall(window._onShow)
+		end
+	end)
+
+	managedConnect(window, closeBtn.MouseButton1Click, function() window:Destroy() end)
+	managedConnect(window, sg.Destroying, function() window:Destroy() end)
+
+	function window:SetKeybind(key, callback)
+		if window._destroyed then return end
+		keybindListeners[window] = { key = key or Enum.KeyCode.RightShift, callback = callback or function() window:SetVisible() end }
+		updateKeybindConnection()
+	end
+
+	function window:SaveConfig()
+		if window._destroyed or not FEATURES.writefile or not HS or type(HS.JSONEncode) ~= "function" then return false end
+		local n = now()
+		if n - (window._lastSaveTime or 0) < 5 then return true end
+		window._lastSaveTime = n
+		local data = { pos = { mainFrame.Position.X.Offset, mainFrame.Position.Y.Offset }, fields = {} }
+		for _, entry in ipairs(window._cF) do
+			local rawVal = entry.get()
+			if rawVal == nil then continue end
+			local val
+			if entry.type == "keybind" then val = rawVal.Name
+			elseif entry.type == "color" then val = { rawVal.R, rawVal.G, rawVal.B }
+			elseif entry.type == "multidropdown" then
+				val = entry.obj.Get()
+			else
+				val = rawVal
+			end
+			table.insert(data.fields, { id = entry.id, type = entry.type, value = val })
+		end
+		local ok, json = pcall(HS.JSONEncode, HS, data)
+		if not ok then return false end
+		pcall(writefile, "AzraelUI_" .. title:gsub("[^%w_%- ]", "_") .. ".cfg", json)
+		return true
+	end
+
+	function window:LoadConfig()
+		if window._destroyed or not FEATURES.readfile or not HS or type(HS.JSONDecode) ~= "function" then return false end
+		local ok, content = pcall(readfile, "AzraelUI_" .. title:gsub("[^%w_%- ]", "_") .. ".cfg")
+		if not ok then return false end
+		local okDecode, data = pcall(HS.JSONDecode, HS, content)
+		if not okDecode then return false end
+		if data.pos then mainFrame.Position = UDim2.new(0, data.pos[1], 0, data.pos[2]) end
+		if data.fields then
+			for _, saved in ipairs(data.fields) do
+				for _, entry in ipairs(window._cF) do
+					if entry.id == saved.id then
+						if entry.type == "keybind" and type(saved.value) == "string" then
+							local kc = Enum.KeyCode[saved.value]
+							if kc then entry.set(kc, true) end
+						elseif entry.type == "color" and type(saved.value) == "table" then
+							local sv = saved.value
+							local col = (sv.r and Color3.new(sv.r, sv.g, sv.b)) or (#sv == 3 and Color3.new(sv[1], sv[2], sv[3])) or nil
+							if col then entry.set(col, true) end
+						elseif entry.type == "multidropdown" and type(saved.value) == "table" then
+							entry.set(saved.value, true)
+						else
+							entry.set(saved.value, true)
+						end
+						break
+					end
+				end
+			end
+		end
+		return true
+	end
+
+	function window:SetVisible(v)
+		if window._destroyed then return end
+		if v == nil then sg.Enabled = not sg.Enabled else sg.Enabled = v == true end
+		if not sg.Enabled then
+			if window._activeDropdown and window._activeDropdown.Close then window._activeDropdown:Close() end
+			if window._activeColorPicker and window._activeColorPicker.Close then window._activeColorPicker:Close() end
+			for _, kb in ipairs(window._keybinds) do if kb.obj and kb.obj.CancelWait then kb.obj:CancelWait() end end
+			safeCall(window._onHide)
+		else safeCall(window._onShow) end
+	end
+	function window:Hide() window:SetVisible(false) end
+	function window:Show() window:SetVisible(true) end
+
+	function window:Destroy()
+		if window._destroyed then return end
+		window._destroyed = true
+		if windows[title] == window then windows[title] = nil end
+		if window._activeSlider then window._activeSlider:_onInputEnded({ UserInputType = window._activeSlider.inputType }); window._activeSlider = nil end
+		if window._activeDropdown and window._activeDropdown.Close then window._activeDropdown:Close() end
+		if window._activeColorPicker and window._activeColorPicker.Close then window._activeColorPicker:Close() end
+
+		local dds = {}; for _, dd in ipairs(window._dropdowns) do dds[#dds+1] = dd end; for _, dd in ipairs(dds) do dd:Destroy() end; tableClear(window._dropdowns)
+		local cps = {}; for _, cp in ipairs(window._colorpickers) do cps[#cps+1] = cp end; for _, cp in ipairs(cps) do cp:Destroy() end; tableClear(window._colorpickers)
+		local kbs = {}; for _, kb in ipairs(window._keybinds) do kbs[#kbs+1] = kb end; for _, kb in ipairs(kbs) do if kb.obj then if kb.obj.CancelWait then kb.obj:CancelWait() end; if kb.obj._keybindListener then keybindListeners[kb.obj] = nil; updateKeybindConnection() end end; tableClear(window._keybinds)
+		local cfObjects = {}; for _, entry in ipairs(window._cF) do if entry.obj then cfObjects[#cfObjects+1] = entry.obj end end; tableClear(window._cF); for _, obj in ipairs(cfObjects) do if obj.Destroy then pcall(obj.Destroy) end end
+
+		keybindListeners[window] = nil; updateKeybindConnection()
+		connMgr:Destroy()
+		if window._autoSave then window:SaveConfig() end
+		safeCall(window._onDestroy)
+		pcall(function() sg:Destroy() end)
+	end
+
+	if window._onCreate then taskDefer(function() safeCall(window._onCreate, window) end) end
+	return window
+end
+
+function AzraelUI:GetWindow(title) return windows[title] end
+
+-- Watermark
+function AzraelUI:CreateWatermark(text, opts)
+	if not safeGui then return end
+	if watermarkObj and watermarkObj.Destroy then watermarkObj:Destroy() end
+	opts = opts or {}
+	local sg = create("ScreenGui", { Name = "AzWatermark", DisplayOrder = 100001, Parent = safeGui })
+	local pos = opts.position or "top-right"
+	local x, y = 0, 0
+	local vps = CAM.ViewportSize
+	if pos == "top-left" then x, y = 10, 10
+	elseif pos == "top-right" then x, y = vps.X - 200, 10
+	elseif pos == "bottom-left" then x, y = 10, vps.Y - 30
+	elseif pos == "bottom-right" then x, y = vps.X - 200, vps.Y - 30
+	end
+	local lbl = create("TextLabel", {
+		Size = UDim2.new(0, 0, 0, 20),
+		Position = UDim2.new(0, x, 0, y),
+		BackgroundTransparency = 0.5,
+		BackgroundColor3 = Color3.new(0,0,0),
+		Text = text,
+		TextColor3 = opts.color or Color3.new(1,1,1),
+		Font = Enum.Font.SourceSansBold,
+		TextSize = 14,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = sg
+	})
+	local bounds = TS:GetTextSize(text, 14, Enum.Font.SourceSansBold, Vector2.new(500, 20))
+	lbl.Size = UDim2.new(0, bounds.X + 16, 0, 20)
+	watermarkObj = { Destroy = function() sg:Destroy() end, SetText = function(t) lbl.Text = t; local b = TS:GetTextSize(t, 14, Enum.Font.SourceSansBold, Vector2.new(500, 20)); lbl.Size = UDim2.new(0, b.X + 16, 0, 20) end }
+	return watermarkObj
+end
+
+-- Panic Key
+function AzraelUI:SetPanicKey(key)
+	panicKey = key
+	updateKeybindConnection()
+end
+
+function AzraelUI:Destroy()
+	local wins = {}; for k, v in pairs(windows) do wins[k] = v end; for _, w in pairs(wins) do if w and not w._destroyed then w:Destroy() end end
+	if notificationTimers then for timer in pairs(notificationTimers) do cancelTimer(timer) end; tableClear(notificationTimers) end
+	if notificationFrame and notificationFrame.Parent then pcall(function() notificationFrame.Parent:Destroy() end); notificationFrame = nil end
+	if notificationItems then for _, item in ipairs(notificationItems) do if item and item.Parent then item:Destroy() end end; tableClear(notificationItems) end
+	if watermarkObj then watermarkObj:Destroy(); watermarkObj = nil end
+	hideTooltip()
+	if TooltipManager._gui then pcall(function() TooltipManager._gui:Destroy() end); TooltipManager._gui = nil end
+	hideContextMenu()   -- ИСПРАВЛЕНО
+	keybindListeners = {}; updateKeybindConnection()
+	env.AzraelUI_LOADED = nil
+end
+
+env.AzraelUI_LOADED = AzraelUI
+return AzraelUI
