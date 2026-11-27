@@ -10,7 +10,7 @@ cp index.html www/
 # ---- capacitor project (app id matches google-services.json) ----
 [ -f capacitor.config.json ] || npx cap init Chess just.chess.com --web-dir www
 [ -d android ] || npx cap add android
-sed -i 's/<activity /<activity android:screenOrientation="portrait" /' android/app/src/main/AndroidManifest.xml
+grep -q 'android:screenOrientation' android/app/src/main/AndroidManifest.xml || sed -i 's/<activity /<activity android:screenOrientation="portrait" /' android/app/src/main/AndroidManifest.xml
 
 # firebase config
 if [ -f google-services.json ]; then
