@@ -107,6 +107,7 @@ public class NearbyPlugin extends Plugin {
         stopSocketServer();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && hotspotReservation != null) {
             try { ((WifiManager.LocalOnlyHotspotReservation) hotspotReservation).close(); } catch (Exception e) {}
+            hotspotReservation = null;
         }
         call.resolve();
     }
