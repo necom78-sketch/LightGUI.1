@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# ---- assemble single-file app from src/ sources ----
+python3 tools/assemble_apk.py
+
 # ---- web assets ----
 [ -f package.json ] || npm init -y >/dev/null
 npm i @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 >/dev/null
@@ -104,7 +107,6 @@ public class NearbyPlugin extends Plugin {
         stopSocketServer();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && hotspotReservation != null) {
             try { ((WifiManager.LocalOnlyHotspotReservation) hotspotReservation).close(); } catch (Exception e) {}
-            hotspotReservation = null;
         }
         call.resolve();
     }
