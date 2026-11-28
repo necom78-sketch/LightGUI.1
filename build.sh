@@ -1,17 +1,6 @@
 #!/bin/bash
 set -e
 
-# ---- one-time fix: correct 2 transcription errors in index.html (no-op after first run) ----
-sed -i 's/if(_wCnt\[f\]===0)score-=/if(_bCnt[f]===0)score-=/' index.html
-sed -i 's/if(!room||room\.result)return;room\.moves=/if(!room||!room.result)return;room.moves=/' index.html
-if ! git diff --quiet; then
-  git config user.name "github-actions[bot]"
-  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-  git add index.html
-  git commit -m "fix: correct 2 transcription errors (black rook eval, online rematch guard)"
-  git push || true
-fi
-
 # ---- web assets ----
 [ -f package.json ] || npm init -y >/dev/null
 npm i @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 >/dev/null

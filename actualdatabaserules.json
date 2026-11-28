@@ -9,9 +9,13 @@
         "v": { ".validate": "newData.isNumber()" },
         "status": { ".validate": "newData.val() == 'waiting' || newData.val() == 'playing' || newData.val() == 'over'" },
         "createdAt": { ".validate": "newData.isNumber()" },
+        "startedAt": { ".validate": "newData.isNumber()" },
         "lastMoveAt": { ".validate": "newData.isNumber()" },
         "moveCount": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 1000" },
         "roomName": { ".validate": "newData.isString() && newData.val().length <= 30" },
+        "presence": {
+          "$color": { ".validate": "($color == 'w' || $color == 'b') && newData.isBoolean()" }
+        },
         "clock": {
           ".validate": "newData.hasChildren(['on','base','inc'])",
           "on": { ".validate": "newData.isBoolean()" },
