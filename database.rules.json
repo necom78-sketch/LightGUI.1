@@ -1,0 +1,46 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "rooms": {
+      "$code": {
+        ".read": "auth != null",
+        ".write": "auth != null",
+        "v": { ".validate": "newData.isNumber()" },
+        "status": { ".validate": "newData.val() == 'waiting' || newData.val() == 'playing' || newData.val() == 'over'" },
+        "createdAt": { ".validate": "newData.isNumber()" },
+        "lastMoveAt": { ".validate": "newData.isNumber()" },
+        "moveCount": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 1000" },
+        "roomName": { ".validate": "newData.isString() && newData.val().length <= 30" },
+        "clock": {
+          ".validate": "newData.hasChildren(['on','base','inc'])",
+          "on": { ".validate": "newData.isBoolean()" },
+          "base": { ".validate": "newData.isNumber() && newData.val() >= 0" },
+          "inc": { ".validate": "newData.isNumber() && newData.val() >= 0" }
+        },
+        "clocks": {
+          "w": { ".validate": "newData.isNumber() && newData.val() >= 0" },
+          "b": { ".validate": "newData.isNumber() && newData.val() >= 0" }
+        },
+        "result": { ".validate": "newData.hasChildren(['type']) && newData.child('type').val().length <= 16" },
+        "takeback": { ".validate": "newData.hasChildren(['by','at']) && (newData.child('by').val() == 'w' || newData.child('by').val() == 'b')" },
+        "reset": { ".validate": "newData.hasChildren(['at'])" },
+        "players": {
+          "$color": {
+            ".validate": "($color == 'w' || $color == 'b') && newData.hasChildren(['uid','name']) && newData.child('name').val().length <= 64 && newData.child('uid').val().length <= 64"
+          }
+        },
+        "moves": {
+          "$idx": {
+            ".validate": "newData.hasChildren(['from','to']) && newData.child('from').isNumber() && newData.child('to').isNumber() && newData.child('from').val() >= 0 && newData.child('from').val() < 64 && newData.child('to').val() >= 0 && newData.child('to').val() < 64"
+          }
+        },
+        "chat": {
+          "$msg": {
+            ".validate": "newData.hasChildren(['name','color','text']) && newData.child('text').val().length <= 140 && newData.child('name').val().length <= 64"
+          }
+        }
+      }
+    }
+  }
+}
